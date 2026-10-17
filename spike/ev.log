@@ -1,12 +1,7 @@
-tick x=1177 y=345 over=true focused=true bar=1.00
-press x=1400 y=1050 over=true inBar=true win=true full=false
-seek to 21.875s
-seek to 21.875s
-tick x=1400 y=1050 over=true focused=true bar=1.00
-tick x=480 y=1030 over=true focused=true bar=1.00
-press x=480 y=1030 over=true inBar=false win=true full=false
-drag held x=480 y=1030
-drag held x=480 y=1030
-drag held x=480 y=1030
-drag held x=480 y=1030
-tick x=480 y=1030 over=true focused=true bar=1.00
+first frame after 57ms
+seek 4.03s -> 4.033s in 50ms
+seek 6.17s -> 6.2s in 77ms
+seek 8.29s -> 8.3s in 90ms
+seek 10.39s -> 10.4s in 32ms
+seek 12.55s -> 12.567s in 51ms
+seek 14.69s -> 14.7s in 70ms

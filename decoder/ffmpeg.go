@@ -49,6 +49,8 @@ static int cd_open(const char *path, cd_t **out, char *err, int errlen) {
     if (!c->cc) { snprintf(err, errlen, "no memory"); cd_close(c); return -1; }
     e = avcodec_parameters_to_context(c->cc, st->codecpar);
     if (e < 0) { av_strerror(e, err, errlen); cd_close(c); return -1; }
+    c->cc->thread_count = 0; // as many threads as the decoder likes
+    c->cc->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     e = avcodec_open2(c->cc, dec, NULL);
     if (e < 0) { av_strerror(e, err, errlen); cd_close(c); return -1; }
     c->width = c->cc->width;
@@ -75,9 +77,10 @@ static void cd_to_rgba(cd_t *c, AVFrame *frm, uint8_t *dst) {
     sws_scale(c->sws, (const uint8_t * const *)frm->data, frm->linesize, 0, frm->height, d, ds);
 }
 
-// cd_next decodes the next frame into dst. 1 = frame (ptsMs set), 0 = EOF,
-// -1 = error (err set).
-static int cd_next(cd_t *c, uint8_t *dst, int64_t *ptsMs, char *err, int errlen) {
+// cd_next decodes the next frame at or after minMs into dst, decoding and
+// dropping the frames before it without converting them, as an accurate
+// seek does. 1 = frame (ptsMs set), 0 = EOF, -1 = error (err set).
+static int cd_next(cd_t *c, uint8_t *dst, int64_t *ptsMs, int64_t minMs, char *err, int errlen) {
     for (;;) {
         if (!c->draining) {
             int r = av_read_frame(c->fc, c->pkt);
@@ -99,8 +102,10 @@ static int cd_next(cd_t *c, uint8_t *dst, int64_t *ptsMs, char *err, int errlen)
             AVStream *st = c->fc->streams[c->stream];
             int64_t ts = c->frm->best_effort_timestamp;
             if (ts == AV_NOPTS_VALUE) ts = c->frm->pts;
-            if (ts != AV_NOPTS_VALUE) *ptsMs = av_rescale_q(ts, st->time_base, (AVRational){1, 1000});
-            else *ptsMs = 0;
+            int64_t ms = 0;
+            if (ts != AV_NOPTS_VALUE) ms = av_rescale_q(ts, st->time_base, (AVRational){1, 1000});
+            if (ms < minMs) { av_frame_unref(c->frm); continue; }
+            *ptsMs = ms;
             cd_to_rgba(c, c->frm, dst);
             av_frame_unref(c->frm);
             return 1;
@@ -174,8 +179,21 @@ func (d *Decoder) Pixels() []byte { return d.buf }
 // Next decodes the next frame. It returns ErrEOF at the end. The returned
 // frame's bytes are reused by the next call.
 func (d *Decoder) Next() (*Frame, error) {
+	return d.decode(-1)
+}
+
+// SeekTo moves to t and returns the first frame at or after it, decoding
+// and dropping the frames between the keyframe and t.
+func (d *Decoder) SeekTo(t time.Duration) (*Frame, error) {
+	if rc := C.cd_seek(d.c, C.int64_t(t.Milliseconds())); rc < 0 {
+		return nil, fmt.Errorf("decoder: seek failed (%d)", int(rc))
+	}
+	return d.decode(C.int64_t(t.Milliseconds()))
+}
+
+func (d *Decoder) decode(minMs C.int64_t) (*Frame, error) {
 	var pts C.int64_t
-	rc := C.cd_next(d.c, (*C.uint8_t)(unsafe.Pointer(&d.buf[0])), &pts, &d.errbuf[0], C.int(len(d.errbuf)))
+	rc := C.cd_next(d.c, (*C.uint8_t)(unsafe.Pointer(&d.buf[0])), &pts, minMs, &d.errbuf[0], C.int(len(d.errbuf)))
 	switch {
 	case rc == 1:
 		d.frame.PTS = time.Duration(pts) * time.Millisecond
