@@ -1,0 +1,12 @@
+Cupbox
+
+This program plays video with FFmpeg (https://ffmpeg.org), used as a
+separate set of DLLs under the GNU Lesser General Public License,
+version 2.1 or later. The FFmpeg license is in
+LICENSE-FFmpeg-LGPLv2.1.txt next to this file.
+
+The FFmpeg build shipped here is configured without GPL components:
+only the MOV/MP4 demuxer, the H.264 and AAC decoders, the H.264 parser,
+the file protocol, swscale and swresample are enabled.
+
+FFmpeg source: https://github.com/FFmpeg/FFmpeg (release/8.0)

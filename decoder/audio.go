@@ -1,8 +1,8 @@
 package decoder
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../.tools/ffmpeg-tmp/ffmpeg-master-latest-win64-lgpl-shared/include
-#cgo LDFLAGS: -L${SRCDIR}/../.tools/ffmpeg-tmp/ffmpeg-master-latest-win64-lgpl-shared/lib -lavformat -lavcodec -lavutil -lswscale -lswresample
+#cgo CFLAGS: -I${SRCDIR}/../.tools/ffmpeg-min/include
+#cgo LDFLAGS: -L${SRCDIR}/../.tools/ffmpeg-min/lib -lavformat -lavcodec -lavutil -lswscale -lswresample
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswresample/swresample.h>

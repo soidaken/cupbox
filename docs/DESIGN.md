@@ -189,6 +189,15 @@ M1 剩余：光标随浮层隐藏；暂停状态下 seek 后的首帧刷新复�
 
 当前是**软解**：libavcodec 在 CPU 上解码，开了多线程（`thread_count=0`，frame+slice 并行）。1080p 够用；4K 会明显吃 CPU，硬解（D3D11VA）留到 M3 之后，接口上只需要在 `decoder` 里加一条 hwaccel 路径，帧仍然回读成 RGBA 交给 mygo。
 
+## 10.2 打包
+
+- **FFmpeg 最小构建**：源码 `release/8.0`，MSYS2 + mingw64 编译，`--disable-everything` 只留 MOV/MP4 解封装、H.264/AAC 解码、H.264 解析、file 协议、swscale、swresample，LGPL v2.1，不开 x86asm（机器上没有 nasm）。DLL 合计 **5.3MB**（原通用构建 165MB）。
+- **安装包**：NSIS，`packaging/cupbox.nsi`，**按用户安装**（`%LOCALAPPDATA%\Programs\Cupbox`，不需要管理员权限）。产物 `dist/Cupbox-Setup-0.1.0.exe` 约 **7.7MB**。
+- **便携版**：`dist/Cupbox-0.1.0-portable.zip` 约 **10MB**，解压即用。
+- **关联注册**（HKCU）：ProgID `Cupbox.mp4`（含 `shell\open\command`、`DefaultIcon`）、`.mp4\OpenWithProgids`、`Applications\cupbox.exe`、`Software\Cupbox\Capabilities` + `RegisteredApplications`，卸载时全部清除。
+- **默认播放器**：Windows 10/11 禁止安装程序静默设置默认程序，只能注册“可成为默认”的资格。安装完成页提供默认勾选的按钮，直接打开 `ms-settings:defaultapps` 让用户选一次；右键“打开方式 → 始终使用”同样生效。
+- 重新打包：`powershell packaging/build.ps1`。
+
 ## 11. 为什么不给 mygo 加纹理 API（v1）
 
 可以加，而且路径清楚，但算下来 v1 不划算。
