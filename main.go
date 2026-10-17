@@ -3,6 +3,7 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"image"
 	"os"
@@ -26,6 +27,12 @@ const (
 	escConfirm = 2 * time.Second
 	dragSlop   = 4 // pixels a press may wander before it moves the window
 )
+
+// iconPNG is the window icon: the same picture the executable carries, so
+// the taskbar shows it in development too.
+//
+//go:embed assets/icon-256.png
+var iconPNG []byte
 
 var t0 = time.Now()
 
@@ -116,6 +123,9 @@ func main() {
 			DisableResize:  true,
 			Content:        ui.View(p.view),
 		})
+		if err := win.SetIcon(iconPNG); err != nil {
+			logf_("window icon: %v", err)
+		}
 		win.OnFileDrop(func(e *mygo.FileDropEvent) {
 			if len(e.Paths) > 0 {
 				p.requestOpen(e.Paths[0])

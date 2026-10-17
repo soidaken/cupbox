@@ -129,6 +129,14 @@ t=0     进程启动
 - 渲染：系统字体，24px，白色 0.97，**不加背景条**，只在右下各偏移 1px 叠一层 `rgba(0,0,0,0.45)` 的阴影保证白画面也能看清；最宽占窗口 80%；**每一行各自在 X 方向居中**（整块也随之中间），超过 80% 宽的行退回整块换行；底边距窗口底 76px（32px 进度条 + 时间行 + 间距），进度条显隐都不会盖住。
 - 播放中每帧重绘，字幕切换误差小于一帧；暂停时静止，seek 后立即重画。
 
+## 8.2 图标与版本信息
+
+- `assets/icon.svg` 是母版：深色圆角方块（#0E0E12，圆角 112/512），亮黄 #FFD60A 的 `cup` / `box` 两行，粗体 800、字号 188、紧字距。
+- 渲染：`chrome --headless --screenshot` 出 512×512 透明 PNG；Pillow 缩出 256 与多尺寸 `icon.ico`（16/24/32/48/64/128/256）。
+- 可执行文件图标与版本信息：`app.rc` 用 `windres -O coff -o rsrc.syso app.rc` 编进二进制；ProductName / FileDescription 都是 `Cupbox`，版本 0.1.0。
+- 运行时的窗口与任务栏图标：`go:embed assets/icon-256.png` + `Window.SetIcon`，开发时任务栏也显示正确图标。
+- 重新生成：`python tools/make-icon.py`（未建，命令见上）→ `windres ...` → `go build`。
+
 ## 9. 目录结构
 
 ```

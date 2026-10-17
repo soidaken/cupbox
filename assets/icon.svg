@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect x="0" y="0" width="512" height="512" rx="112" ry="112" fill="#0E0E12"/>
+  <rect x="8" y="8" width="496" height="496" rx="104" ry="104" fill="none" stroke="#22222A" stroke-width="4"/>
+  <g font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-weight="800"
+     font-size="188" letter-spacing="-6" text-anchor="middle" fill="#FFD60A">
+    <text x="256" y="252">cup</text>
+    <text x="256" y="432">box</text>
+  </g>
+</svg>
