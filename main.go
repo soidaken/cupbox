@@ -79,6 +79,8 @@ func main() {
 		}
 		p.bm.Update(p.img)
 
+		p.subs = loadSubtitles(path)
+
 		// Audio is the clock: the picture follows what is heard.
 		if ad, err := decoder.OpenAudio(path); err == nil {
 			p.ad = ad
@@ -246,6 +248,7 @@ type player struct {
 	ad   *decoder.Audio
 	ap   *audio.Player
 	win  *mygo.Window
+	subs *subtitles
 
 	pending *decoder.Frame
 	eof     bool
@@ -386,6 +389,7 @@ func (p *player) load(path string) {
 		p.ad.Close()
 	}
 	p.dec, p.info, p.ad, p.ap = dec, info, nil, nil
+	p.subs = loadSubtitles(path)
 	if aerr == nil {
 		p.ad = ad
 		p.ap = audio.NewPlayer(ad)
@@ -671,6 +675,10 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 
 	pt.Image(p.bm, r, ui.Contain)
 
+	if line := p.subs.at(p.position()); line != "" {
+		p.drawSubtitle(pt, r, line)
+	}
+
 	if time.Since(p.escAt) < escConfirm {
 		p.drawCentered(pt, r, "再按一次 Esc 退出", 15, ui.RGBA(255, 255, 255, 0.7))
 	}
@@ -790,7 +798,7 @@ func (p *player) reset() {
 		p.ad.Close()
 		p.ad = nil
 	}
-	p.bm, p.img, p.pending = nil, nil, nil
+	p.bm, p.img, p.pending, p.subs = nil, nil, nil, nil
 	p.empty, p.eof, p.paused = true, false, false
 	p.eofAt = time.Time{}
 	p.bar, p.shown, p.dropped = 0, 0, 0
@@ -838,6 +846,22 @@ func (p *player) keepOnScreen() {
 	}
 	setWindowPos(p.win.NativeHandle(), 0, x, y, 0, 0,
 		swpNoSize|swpNoZOrder|swpNoActivate)
+}
+
+// drawSubtitle paints the line centered above the bar, on a dim band so it
+// reads over a bright picture too.
+func (p *player) drawSubtitle(pt *ui.Painter, r ui.Rect, line string) {
+	const size = 24
+	maxW := r.W * 0.8
+	span := ui.Span{Text: line, Size: size, Color: ui.RGBA(255, 255, 255, 0.97)}
+	tw, th := pt.MeasureText(maxW, span)
+	// Clear of the bar and the clock above it, whether they show or not.
+	const bottom = barHeight + 44
+	x := r.X + (r.W-tw)/2
+	y := r.Y + r.H - bottom - th
+	const pad = 12
+	pt.Fill(ui.Rect{X: x - pad, Y: y - 8, W: tw + 2*pad, H: th + 16}, ui.RGBA(0, 0, 0, 0.42), 6)
+	pt.RichText(x, y, maxW, span)
 }
 
 func (p *player) drawCentered(pt *ui.Painter, r ui.Rect, s string, size float32, c ui.Color) {
