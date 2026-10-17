@@ -642,7 +642,7 @@ func (p *player) update() {
 	}
 	p.lastX, p.lastY, p.lastW, p.lastH = x, y, w, h
 	target := float32(0)
-	if now.Sub(p.idle) < 2*time.Second || p.dragging {
+	if now.Sub(p.idle) < time.Second || p.dragging {
 		target = 1
 	}
 	p.bar += (target - p.bar) * 0.25
@@ -771,7 +771,7 @@ func (p *player) armFade() {
 		p.mu.Unlock()
 		return
 	}
-	d := time.Until(p.idle.Add(2 * time.Second))
+	d := time.Until(p.idle.Add(time.Second))
 	if d < 0 {
 		d = 0
 	}
@@ -859,8 +859,11 @@ func (p *player) drawSubtitle(pt *ui.Painter, r ui.Rect, line string) {
 	const bottom = barHeight + 44
 	x := r.X + (r.W-tw)/2
 	y := r.Y + r.H - bottom - th
-	const pad = 12
-	pt.Fill(ui.Rect{X: x - pad, Y: y - 8, W: tw + 2*pad, H: th + 16}, ui.RGBA(0, 0, 0, 0.42), 6)
+	// A shadow, not a background: white text alone disappears over a white
+	// picture.
+	shadow := span
+	shadow.Color = ui.RGBA(0, 0, 0, 0.45)
+	pt.RichText(x+1, y+1, maxW, shadow)
 	pt.RichText(x, y, maxW, span)
 }
 
