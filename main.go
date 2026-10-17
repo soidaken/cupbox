@@ -111,7 +111,16 @@ func main() {
 			UseContentSize: true,
 			Frameless:      true,
 			DisableResize:  true,
-			Content:        ui.View(func(c *ui.Context) { game.View(c, p).Fill() }),
+			Content: ui.View(func(c *ui.Context) {
+				// The picture is the drop target: it reports the drag, so
+				// the drag image can move without the decoder's work, and
+				// it takes the dropped files itself.
+				e := game.View(c, p).Fill()
+				p.fileDrag = e.FileDragOver()
+				if files := e.DroppedFiles(); len(files) > 0 {
+					p.requestOpen(files[0])
+				}
+			}),
 		})
 		win.OnFileDrop(func(e *mygo.FileDropEvent) {
 			if len(e.Paths) > 0 {
@@ -273,6 +282,9 @@ type player struct {
 	// Esc asks twice before quitting.
 	escAt time.Time
 
+	// fileDrag is true while files dragged from another app hover.
+	fileDrag bool
+
 	// openPath is a file a drop or a second instance asked for.
 	mu       sync.Mutex
 	openPath string
@@ -381,6 +393,9 @@ func (p *player) load(path string) {
 	p.base, p.started = 0, time.Now()
 	p.paused, p.eof, p.pending = false, false, nil
 	p.bar, p.idle = 1, time.Now()
+	if p.full {
+		p.toggleFullscreen()
+	}
 	if p.win != nil {
 		w, h := fitToScreen(info.Width, info.Height)
 		p.win.SetContentSize(w, h)
@@ -531,7 +546,7 @@ func (p *player) Update(in *game.Input) {
 	pending := p.openPath
 	p.openPath = ""
 	p.mu.Unlock()
-	if pending != "" && p.empty {
+	if pending != "" {
 		p.load(pending)
 	}
 
@@ -617,7 +632,7 @@ func (p *player) Update(in *game.Input) {
 		p.bar = 0
 	}
 
-	if p.paused || p.eof || !p.ready {
+	if p.paused || p.eof || !p.ready || p.fileDrag {
 		return
 	}
 	p.pump(p.position(), 4)
