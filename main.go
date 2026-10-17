@@ -157,6 +157,10 @@ var (
 	procGetWindowRect   = user32.NewProc("GetWindowRect")
 	procMonitorFromWin  = user32.NewProc("MonitorFromWindow")
 	procGetMonitorInfoW = user32.NewProc("GetMonitorInfoW")
+	procGetWindowLong   = user32.NewProc("GetWindowLongPtrW")
+	procSetWindowLong   = user32.NewProc("SetWindowLongPtrW")
+	dwmapi              = syscall.NewLazyDLL("dwmapi.dll")
+	procDwmSetAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
 )
 
 const (
@@ -166,6 +170,18 @@ const (
 	swpShowWindow = 0x0040
 	hwndTop       = ^uintptr(0) // (HWND)-1
 	hwndNotTop    = ^uintptr(1) // (HWND)-2
+	swpFrameChanged = 0x0020
+
+	gwlStyle = -16
+	wsCaption   = 0x00C00000
+	wsThickFrame = 0x00040000
+
+	dwmwaCornerPreference = 33
+	dwmwaBorderColor      = 34
+	dwmcpDoNotRound  = 1
+	dwmcpDefault     = 0
+	dwmColorNone     = 0xFFFFFFFE
+	dwmColorDefault  = 0xFFFFFFFF
 )
 
 type point struct{ X, Y int32 }
@@ -192,6 +208,10 @@ func windowRect(hwnd uintptr) (rect, bool) {
 
 func setWindowPos(hwnd, after uintptr, x, y, cx, cy int32, flags uint32) {
 	procSetWindowPos.Call(hwnd, after, uintptr(x), uintptr(y), uintptr(cx), uintptr(cy), uintptr(flags))
+}
+
+func setWindowLong(hwnd uintptr, index int, value uintptr) {
+	procSetWindowLong.Call(hwnd, uintptr(index), value)
 }
 
 // monitorOf returns the monitor a window is on.
@@ -242,8 +262,9 @@ type player struct {
 	ticks int
 
 	// window
-	full      bool
-	saved     rect
+	full       bool
+	saved      rect
+	savedStyle uintptr
 	dragWin   bool
 	dragMoved bool
 	dragFrom  point
@@ -451,15 +472,25 @@ func (p *player) pump(pos time.Duration, max int) {
 	}
 }
 
+// setDwm tells the window manager how to draw the window's frame: Windows
+// 11 rounds frameless windows and paints a one pixel border, which shows at
+// the edge of a fullscreen picture.
+func setDwm(hwnd uintptr, corners int32, border uint32) {
+	procDwmSetAttribute.Call(hwnd, dwmwaCornerPreference, uintptr(unsafe.Pointer(&corners)), 4)
+	procDwmSetAttribute.Call(hwnd, dwmwaBorderColor, uintptr(unsafe.Pointer(&border)), 4)
+}
+
 func (p *player) toggleFullscreen() {
 	if p.win == nil {
 		return
 	}
 	hwnd := p.win.NativeHandle()
 	if p.full {
+		setWindowLong(hwnd, gwlStyle, p.savedStyle)
 		w := p.saved.Right - p.saved.Left
 		h := p.saved.Bottom - p.saved.Top
-		setWindowPos(hwnd, hwndNotTop, p.saved.Left, p.saved.Top, w, h, 0)
+		setWindowPos(hwnd, hwndNotTop, p.saved.Left, p.saved.Top, w, h, swpFrameChanged)
+		setDwm(hwnd, dwmcpDefault, dwmColorDefault)
 		p.full = false
 		return
 	}
@@ -468,7 +499,12 @@ func (p *player) toggleFullscreen() {
 		return
 	}
 	p.saved, _ = windowRect(hwnd)
-	setWindowPos(hwnd, hwndTop, m.Left, m.Top, m.Right-m.Left, m.Bottom-m.Top, swpShowWindow)
+	idx := int32(gwlStyle)
+	style, _, _ := procGetWindowLong.Call(hwnd, uintptr(idx))
+	p.savedStyle = uintptr(style)
+	setWindowLong(hwnd, gwlStyle, uintptr(style&^(wsCaption|wsThickFrame)))
+	setWindowPos(hwnd, hwndTop, m.Left, m.Top, m.Right-m.Left, m.Bottom-m.Top, swpShowWindow|swpFrameChanged)
+	setDwm(hwnd, dwmcpDoNotRound, dwmColorNone)
 	p.full = true
 }
 
