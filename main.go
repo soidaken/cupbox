@@ -408,7 +408,7 @@ func (p *player) load(path string) {
 	if p.win != nil {
 		w, h := fitToScreen(info.Width, info.Height)
 		p.win.SetContentSize(w, h)
-		p.center()
+		p.keepOnScreen()
 	}
 	logf_("loaded %s %dx%d", path, info.Width, info.Height)
 }
@@ -800,14 +800,14 @@ func (p *player) reset() {
 	}
 	if p.win != nil {
 		p.win.SetContentSize(emptyW, emptyH)
-		p.center()
+		p.keepOnScreen()
 	}
 	logf_("reset to empty")
 }
 
-// center puts the window in the middle of the work area of the monitor it
-// is on.
-func (p *player) center() {
+// keepOnScreen leaves the window where it is, and only nudges it back if
+// resizing pushed part of it off the monitor's work area.
+func (p *player) keepOnScreen() {
 	if p.win == nil {
 		return
 	}
@@ -819,10 +819,25 @@ func (p *player) center() {
 	if !ok {
 		return
 	}
+	x, y := r.Left, r.Top
 	w, h := r.Right-r.Left, r.Bottom-r.Top
-	setWindowPos(p.win.NativeHandle(), 0,
-		m.Left+(m.Right-m.Left-w)/2, m.Top+(m.Bottom-m.Top-h)/2,
-		0, 0, swpNoSize|swpNoZOrder|swpNoActivate)
+	if x+w > m.Right {
+		x = m.Right - w
+	}
+	if y+h > m.Bottom {
+		y = m.Bottom - h
+	}
+	if x < m.Left {
+		x = m.Left
+	}
+	if y < m.Top {
+		y = m.Top
+	}
+	if x == r.Left && y == r.Top {
+		return
+	}
+	setWindowPos(p.win.NativeHandle(), 0, x, y, 0, 0,
+		swpNoSize|swpNoZOrder|swpNoActivate)
 }
 
 func (p *player) drawCentered(pt *ui.Painter, r ui.Rect, s string, size float32, c ui.Color) {
