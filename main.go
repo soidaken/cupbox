@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -80,6 +81,7 @@ func main() {
 
 		// Audio is the clock: the picture follows what is heard.
 		if ad, err := decoder.OpenAudio(path); err == nil {
+			p.ad = ad
 			p.ap = audio.NewPlayer(ad)
 			p.ap.Play()
 		} else {
@@ -88,12 +90,21 @@ func main() {
 		winW, winH = info.Width, info.Height
 	}
 
+	if !mygo.App.RequestSingleInstanceLock() {
+		return // another Cupbox is running: it got our command line
+	}
+	mygo.App.OnSecondInstance(func(args []string, _ string) {
+		if len(args) > 0 {
+			p.requestOpen(args[0])
+		}
+	})
+
 	mygo.App.WhenReady(func() {
 		w, h := winW, winH
 		if p.dec != nil {
 			w, h = fitToScreen(p.info.Width, p.info.Height)
 		}
-		mygo.NewWindow(mygo.WindowOptions{
+		win := mygo.NewWindow(mygo.WindowOptions{
 			Title:          "Cupbox",
 			Width:          w,
 			Height:         h,
@@ -101,6 +112,11 @@ func main() {
 			Frameless:      true,
 			DisableResize:  true,
 			Content:        ui.View(func(c *ui.Context) { game.View(c, p).Fill() }),
+		})
+		win.OnFileDrop(func(e *mygo.FileDropEvent) {
+			if len(e.Paths) > 0 {
+				p.requestOpen(e.Paths[0])
+			}
 		})
 	})
 	if err := mygo.App.Run(); err != nil {
@@ -196,6 +212,7 @@ type player struct {
 	info decoder.Info
 	img  *image.RGBA
 	bm   *ui.Bitmap
+	ad   *decoder.Audio
 	ap   *audio.Player
 	win  *mygo.Window
 
@@ -234,6 +251,10 @@ type player struct {
 
 	// Esc asks twice before quitting.
 	escAt time.Time
+
+	// openPath is a file a drop or a second instance asked for.
+	mu       sync.Mutex
+	openPath string
 }
 
 func (p *player) duration() time.Duration {
@@ -251,6 +272,99 @@ func (p *player) position() time.Duration {
 		return p.ap.Position()
 	}
 	return p.base + time.Since(p.started)
+}
+
+func (p *player) startWindowDrag() {
+	if p.win == nil || p.full {
+		return
+	}
+	c, ok := cursorPos()
+	if !ok {
+		return
+	}
+	r, ok := windowRect(p.win.NativeHandle())
+	if !ok {
+		return
+	}
+	p.dragWin, p.dragMoved, p.dragFrom, p.winFrom = true, false, c, r
+}
+
+func (p *player) dragIfHeld(in *game.Input) {
+	if !p.dragWin {
+		return
+	}
+	if !in.PointerDown(0) {
+		p.dragWin = false
+		return
+	}
+	c, ok := cursorPos()
+	if !ok {
+		return
+	}
+	dx, dy := c.X-p.dragFrom.X, c.Y-p.dragFrom.Y
+	if !p.dragMoved && (dx > dragSlop || dx < -dragSlop || dy > dragSlop || dy < -dragSlop) {
+		p.dragMoved = true
+	}
+	if p.dragMoved {
+		setWindowPos(p.win.NativeHandle(), 0,
+			p.winFrom.Left+dx, p.winFrom.Top+dy, 0, 0,
+			swpNoSize|swpNoZOrder|swpNoActivate)
+	}
+}
+
+// requestOpen asks for path to be played, if nothing plays yet.
+func (p *player) requestOpen(path string) {
+	p.mu.Lock()
+	p.openPath = path
+	p.mu.Unlock()
+}
+
+// load opens path and plays it. It is called on the UI thread, and only
+// while nothing plays: a file dropped on a playing picture is ignored.
+func (p *player) load(path string) {
+	dec, info, err := decoder.Open(path)
+	if err != nil || info.Width == 0 || info.Height == 0 {
+		logf_("open ignored: %v", err)
+		return
+	}
+	if _, err := dec.Next(); err != nil {
+		dec.Close()
+		logf_("open ignored: %v", err)
+		return
+	}
+	ad, aerr := decoder.OpenAudio(path)
+
+	if p.dec != nil {
+		p.dec.Close()
+	}
+	if p.ap != nil {
+		p.ap.Close()
+	}
+	if p.ad != nil {
+		p.ad.Close()
+	}
+	p.dec, p.info, p.ad, p.ap = dec, info, nil, nil
+	if aerr == nil {
+		p.ad = ad
+		p.ap = audio.NewPlayer(ad)
+		p.ap.Play()
+	}
+	p.img = &image.RGBA{
+		Pix:    dec.Pixels(),
+		Stride: info.Width * 4,
+		Rect:   image.Rect(0, 0, info.Width, info.Height),
+	}
+	p.bm = ui.NewBitmap(p.img)
+	p.bm.Update(p.img)
+	p.empty = false
+	p.base, p.started = 0, time.Now()
+	p.paused, p.eof, p.pending = false, false, nil
+	p.bar, p.idle = 1, time.Now()
+	if p.win != nil {
+		w, h := fitToScreen(info.Width, info.Height)
+		p.win.SetContentSize(w, h)
+	}
+	logf_("loaded %s %dx%d", path, info.Width, info.Height)
 }
 
 // mute silences the sound while seeks churn, and restores the volume after.
@@ -374,7 +488,20 @@ func (p *player) Update(in *game.Input) {
 		return
 	}
 
+	p.mu.Lock()
+	pending := p.openPath
+	p.openPath = ""
+	p.mu.Unlock()
+	if pending != "" && p.empty {
+		p.load(pending)
+	}
+
 	if p.empty {
+		// The empty window only drags; nothing else answers.
+		if in.PointerPressed(0) {
+			p.startWindowDrag()
+		}
+		p.dragIfHeld(in)
 		return
 	}
 	if in.Pressed(ui.KeySpace) {
@@ -417,13 +544,7 @@ func (p *player) Update(in *game.Input) {
 			p.toggleFullscreen()
 		} else {
 			p.idle = now
-			if !p.full && p.win != nil {
-				if c, ok := cursorPos(); ok {
-					if r, ok := windowRect(p.win.NativeHandle()); ok {
-						p.dragWin, p.dragMoved, p.dragFrom, p.winFrom = true, false, c, r
-					}
-				}
-			}
+			p.startWindowDrag()
 		}
 		p.lastTap = now
 	}
@@ -436,23 +557,7 @@ func (p *player) Update(in *game.Input) {
 			p.mute(false)
 		}
 	}
-	if p.dragWin {
-		if in.PointerDown(0) {
-			if c, ok := cursorPos(); ok {
-				dx, dy := c.X-p.dragFrom.X, c.Y-p.dragFrom.Y
-				if !p.dragMoved && (dx > dragSlop || dx < -dragSlop || dy > dragSlop || dy < -dragSlop) {
-					p.dragMoved = true
-				}
-				if p.dragMoved {
-					setWindowPos(p.win.NativeHandle(), 0,
-						p.winFrom.Left+dx, p.winFrom.Top+dy, 0, 0,
-						swpNoSize|swpNoZOrder|swpNoActivate)
-				}
-			}
-		} else {
-			p.dragWin = false
-		}
-	}
+	p.dragIfHeld(in)
 
 	// The bar and the clock show when the mouse moves, and fade after two
 	// seconds of stillness.
@@ -488,7 +593,7 @@ func (p *player) Draw(pt *ui.Painter, r ui.Rect, alpha float64) {
 	pt.Fill(r, ui.RGBA(0, 0, 0, 1), 0)
 
 	if p.empty {
-		p.drawCentered(pt, r, "打开一个 MP4 文件开始播放", 16, ui.RGBA(255, 255, 255, 0.55))
+		p.drawCentered(pt, r, "把视频拖到这里，或双击视频文件播放", 16, ui.RGBA(255, 255, 255, 0.55))
 		return
 	}
 
