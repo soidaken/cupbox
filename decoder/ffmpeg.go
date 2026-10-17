@@ -33,6 +33,7 @@ static void cd_close(cd_t *c) {
 }
 
 static int cd_open(const char *path, cd_t **out, char *err, int errlen) {
+    av_log_set_level(AV_LOG_ERROR);
     cd_t *c = calloc(1, sizeof(cd_t));
     if (!c) return -1;
     int e = avformat_open_input(&c->fc, path, NULL, NULL);

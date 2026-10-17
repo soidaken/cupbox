@@ -1,0 +1,12 @@
+tick x=1177 y=345 over=true focused=true bar=1.00
+press x=1400 y=1050 over=true inBar=true win=true full=false
+seek to 21.875s
+seek to 21.875s
+tick x=1400 y=1050 over=true focused=true bar=1.00
+tick x=480 y=1030 over=true focused=true bar=1.00
+press x=480 y=1030 over=true inBar=false win=true full=false
+drag held x=480 y=1030
+drag held x=480 y=1030
+drag held x=480 y=1030
+drag held x=480 y=1030
+tick x=480 y=1030 over=true focused=true bar=1.00
