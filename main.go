@@ -532,9 +532,13 @@ func (p *player) Update(in *game.Input) {
 	step(ui.KeyRight, 2*time.Second)
 
 	// Volume: the wheel, with nothing on screen to show it.
+	// The wheel arrives as about ±100 per notch: scrolling down is
+	// positive here, and lowers the volume.
 	if _, dy := in.Wheel(); dy != 0 && p.ap != nil {
-		p.volume = min(max(p.volume+float64(dy)*0.02, 0), 1)
+		p.volume = min(max(p.volume-float64(dy)/100*0.05, 0), 1)
 		p.ap.SetVolume(p.volume)
+		p.idle = now
+		logf_("volume %.0f%%", p.volume*100)
 	}
 
 	inBar := over && y >= h-barHeight
@@ -623,7 +627,14 @@ func (p *player) Draw(pt *ui.Painter, r ui.Rect, alpha float64) {
 	s := clock(p.position()) + " / " + clock(p.duration())
 	col := ui.RGBA(255, 255, 255, 0.75*a)
 	tw, th := pt.MeasureText(0, ui.Span{Text: s, Size: 13, Color: col})
-	pt.Text(r.X+(r.W-tw)/2, bar.Y-th-8, s, 13, col)
+	x := r.X + (r.W-tw)/2
+	pt.Text(x, bar.Y-th-8, s, 13, col)
+
+	// The volume follows the clock, and only shows with it.
+	vol := fmt.Sprintf("%.0f%%", p.volume*100)
+	vw, _ := pt.MeasureText(0, ui.Span{Text: vol, Size: 13})
+	pt.Text(x+tw+14, bar.Y-th-8, vol, 13, ui.RGBA(255, 255, 255, 0.6*a))
+	_ = vw
 }
 
 func (p *player) drawCentered(pt *ui.Painter, r ui.Rect, s string, size float32, c ui.Color) {
