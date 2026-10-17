@@ -478,11 +478,14 @@ func (p *player) Update(in *game.Input) {
 	w, h := in.Size()
 
 	if in.Pressed(ui.KeyEscape) {
-		if p.full {
+		switch {
+		case p.empty:
+			mygo.App.Quit() // nothing to lose: one press quits the empty window
+		case p.full:
 			p.toggleFullscreen()
-		} else if now.Sub(p.escAt) < escConfirm {
+		case now.Sub(p.escAt) < escConfirm:
 			mygo.App.Quit()
-		} else {
+		default:
 			p.escAt = now
 		}
 		return
