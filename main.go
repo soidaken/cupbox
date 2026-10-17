@@ -15,7 +15,6 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/audio"
-	"github.com/egoist/mygo/plugins/game"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -48,12 +47,13 @@ func logf_(format string, a ...any) {
 
 func main() {
 	var (
-		p      *player
-		winW   = emptyW
-		winH   = emptyH
+		p    *player
+		winW = emptyW
+		winH = emptyH
 	)
 	if len(os.Args) < 2 {
 		p = &player{empty: true}
+		p.in = newInput()
 	} else {
 		path := os.Args[1]
 		dec, info, err := decoder.Open(path)
@@ -63,7 +63,7 @@ func main() {
 		if info.Width == 0 || info.Height == 0 {
 			fail("no video")
 		}
-		p = &player{dec: dec, info: info, volume: 1}
+		p = &player{dec: dec, info: info, volume: 1, in: newInput()}
 		p.img = &image.RGBA{
 			Pix:    dec.Pixels(),
 			Stride: info.Width * 4,
@@ -111,16 +111,7 @@ func main() {
 			UseContentSize: true,
 			Frameless:      true,
 			DisableResize:  true,
-			Content: ui.View(func(c *ui.Context) {
-				// The picture is the drop target: it reports the drag, so
-				// the drag image can move without the decoder's work, and
-				// it takes the dropped files itself.
-				e := game.View(c, p).Fill()
-				p.fileDrag = e.FileDragOver()
-				if files := e.DroppedFiles(); len(files) > 0 {
-					p.requestOpen(files[0])
-				}
-			}),
+			Content:        ui.View(p.view),
 		})
 		win.OnFileDrop(func(e *mygo.FileDropEvent) {
 			if len(e.Paths) > 0 {
@@ -173,24 +164,24 @@ var (
 )
 
 const (
-	swpNoSize     = 0x0001
-	swpNoZOrder   = 0x0004
-	swpNoActivate = 0x0010
-	swpShowWindow = 0x0040
-	hwndTop       = ^uintptr(0) // (HWND)-1
-	hwndNotTop    = ^uintptr(1) // (HWND)-2
+	swpNoSize       = 0x0001
+	swpNoZOrder     = 0x0004
+	swpNoActivate   = 0x0010
+	swpShowWindow   = 0x0040
+	hwndTop         = ^uintptr(0) // (HWND)-1
+	hwndNotTop      = ^uintptr(1) // (HWND)-2
 	swpFrameChanged = 0x0020
 
-	gwlStyle = -16
-	wsCaption   = 0x00C00000
+	gwlStyle     = -16
+	wsCaption    = 0x00C00000
 	wsThickFrame = 0x00040000
 
 	dwmwaCornerPreference = 33
 	dwmwaBorderColor      = 34
-	dwmcpDoNotRound  = 1
-	dwmcpDefault     = 0
-	dwmColorNone     = 0xFFFFFFFE
-	dwmColorDefault  = 0xFFFFFFFF
+	dwmcpDoNotRound       = 1
+	dwmcpDefault          = 0
+	dwmColorNone          = 0xFFFFFFFE
+	dwmColorDefault       = 0xFFFFFFFF
 )
 
 type point struct{ X, Y int32 }
@@ -225,13 +216,24 @@ func setWindowLong(hwnd uintptr, index int, value uintptr) {
 
 // monitorOf returns the monitor a window is on.
 func monitorOf(hwnd uintptr) (rect, bool) {
+	mi, ok := monitorInfoOf(hwnd)
+	return mi.rcMonitor, ok
+}
+
+// workAreaOf returns the area of the window's monitor without the taskbar.
+func workAreaOf(hwnd uintptr) (rect, bool) {
+	mi, ok := monitorInfoOf(hwnd)
+	return mi.rcWork, ok
+}
+
+func monitorInfoOf(hwnd uintptr) (monitorInfo, bool) {
 	m, _, _ := procMonitorFromWin.Call(hwnd, 2 /* MONITOR_DEFAULTTONEAREST */)
 	if m == 0 {
-		return rect{}, false
+		return monitorInfo{}, false
 	}
 	mi := monitorInfo{cbSize: uint32(unsafe.Sizeof(monitorInfo{}))}
 	ok, _, _ := procGetMonitorInfoW.Call(m, uintptr(unsafe.Pointer(&mi)))
-	return mi.rcMonitor, ok != 0
+	return mi, ok != 0
 }
 
 type player struct {
@@ -274,10 +276,10 @@ type player struct {
 	full       bool
 	saved      rect
 	savedStyle uintptr
-	dragWin   bool
-	dragMoved bool
-	dragFrom  point
-	winFrom   rect
+	dragWin    bool
+	dragMoved  bool
+	dragFrom   point
+	winFrom    rect
 
 	// Esc asks twice before quitting.
 	escAt time.Time
@@ -288,6 +290,13 @@ type player struct {
 	// openPath is a file a drop or a second instance asked for.
 	mu       sync.Mutex
 	openPath string
+
+	// The picture is drawn on demand, not on a clock: in is the input of
+	// the frame being drawn, ctx the one Invalidate asks for another.
+	in        *input
+	ctx       *ui.Context
+	fadeTimer *time.Timer
+	eofAt     time.Time
 }
 
 func (p *player) duration() time.Duration {
@@ -322,11 +331,11 @@ func (p *player) startWindowDrag() {
 	p.dragWin, p.dragMoved, p.dragFrom, p.winFrom = true, false, c, r
 }
 
-func (p *player) dragIfHeld(in *game.Input) {
+func (p *player) dragIfHeld() {
 	if !p.dragWin {
 		return
 	}
-	if !in.PointerDown(0) {
+	if !p.in.PointerDown(0) {
 		p.dragWin = false
 		return
 	}
@@ -399,6 +408,7 @@ func (p *player) load(path string) {
 	if p.win != nil {
 		w, h := fitToScreen(info.Width, info.Height)
 		p.win.SetContentSize(w, h)
+		p.center()
 	}
 	logf_("loaded %s %dx%d", path, info.Width, info.Height)
 }
@@ -469,6 +479,7 @@ func (p *player) pump(pos time.Duration, max int) {
 			f, err := p.dec.Next()
 			if err != nil {
 				p.eof = true
+				p.eofAt = time.Now().Add(1200 * time.Millisecond)
 				return
 			}
 			p.pending = f
@@ -523,12 +534,12 @@ func (p *player) toggleFullscreen() {
 	p.full = true
 }
 
-func (p *player) Update(in *game.Input) {
+func (p *player) update() {
 	now := time.Now()
-	x, y, over := in.Pointer()
-	w, h := in.Size()
+	x, y, over := p.in.Pointer()
+	w, h := p.in.Size()
 
-	if in.Pressed(ui.KeyEscape) {
+	if p.in.Pressed(ui.KeyEscape) {
 		switch {
 		case p.empty:
 			mygo.App.Quit() // nothing to lose: one press quits the empty window
@@ -549,32 +560,35 @@ func (p *player) Update(in *game.Input) {
 	if pending != "" {
 		p.load(pending)
 	}
+	if p.eof && !p.eofAt.IsZero() && now.After(p.eofAt) {
+		p.reset()
+	}
 
 	if p.empty {
 		// The empty window only drags; nothing else answers.
-		if in.PointerPressed(0) {
+		if p.in.PointerPressed(0) {
 			p.startWindowDrag()
 		}
-		p.dragIfHeld(in)
+		p.dragIfHeld()
 		return
 	}
-	if in.Pressed(ui.KeySpace) {
+	if p.in.Pressed(ui.KeySpace) {
 		p.setPaused(!p.paused)
 	}
 
 	// Arrow keys: a tap steps two seconds; holding repeats the step as
 	// fast as the picture can follow.
 	step := func(k ui.Key, dir time.Duration) {
-		if in.Pressed(k) {
+		if p.in.Pressed(k) {
 			p.mute(true)
 			p.seekTo(p.position() + dir)
 			p.keyHeld, p.keyLast = true, now
 			p.idle = now
-		} else if in.Down(k) && p.keyHeld && now.Sub(p.keyLast) > 200*time.Millisecond {
+		} else if p.in.Down(k) && p.keyHeld && now.Sub(p.keyLast) > 200*time.Millisecond {
 			p.seekTo(p.position() + dir)
 			p.keyLast = now
 			p.idle = now
-		} else if in.Released(k) && p.keyHeld {
+		} else if p.in.Released(k) && p.keyHeld {
 			p.keyHeld = false
 			p.mute(false)
 		}
@@ -585,7 +599,7 @@ func (p *player) Update(in *game.Input) {
 	// Volume: the wheel, with nothing on screen to show it.
 	// The wheel arrives as about ±100 per notch: scrolling down is
 	// positive here, and lowers the volume.
-	if _, dy := in.Wheel(); dy != 0 && p.ap != nil {
+	if _, dy := p.in.Wheel(); dy != 0 && p.ap != nil {
 		p.volume = min(max(p.volume-float64(dy)/100*0.05, 0), 1)
 		p.ap.SetVolume(p.volume)
 		p.idle = now
@@ -593,7 +607,7 @@ func (p *player) Update(in *game.Input) {
 	}
 
 	inBar := over && y >= h-barHeight
-	if in.PointerPressed(0) {
+	if p.in.PointerPressed(0) {
 		if inBar {
 			p.dragging = true
 			p.mute(true)
@@ -607,7 +621,7 @@ func (p *player) Update(in *game.Input) {
 		p.lastTap = now
 	}
 	if p.dragging {
-		if in.PointerDown(0) {
+		if p.in.PointerDown(0) {
 			p.seekTo(time.Duration(float64(x) / float64(w) * float64(p.duration())))
 			p.idle = now
 		} else {
@@ -615,7 +629,7 @@ func (p *player) Update(in *game.Input) {
 			p.mute(false)
 		}
 	}
-	p.dragIfHeld(in)
+	p.dragIfHeld()
 
 	// The bar and the clock show when the mouse moves, and fade after two
 	// seconds of stillness.
@@ -638,7 +652,7 @@ func (p *player) Update(in *game.Input) {
 	p.pump(p.position(), 4)
 }
 
-func (p *player) Draw(pt *ui.Painter, r ui.Rect, alpha float64) {
+func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 	if !p.ready {
 		p.ready = true
 		p.started = time.Now()
@@ -686,6 +700,129 @@ func (p *player) Draw(pt *ui.Painter, r ui.Rect, alpha float64) {
 	vw, _ := pt.MeasureText(0, ui.Span{Text: vol, Size: 13})
 	pt.Text(x+tw+14, bar.Y-th-8, vol, 13, ui.RGBA(255, 255, 255, 0.6*a))
 	_ = vw
+}
+
+// view builds the window's picture: one element that fills it, takes the
+// input, and paints on demand instead of on a clock of its own.
+func (p *player) view(c *ui.Context) {
+	p.ctx = c
+	e := ui.Box(c).Fill().Focusable().AutoFocus()
+	e.HandleInput(p.in.handle)
+	e.Draw(p.paint)
+	// The picture is the drop target too: it reports the drag so the system
+	// drag image can move while nothing else runs, and it takes the files.
+	p.fileDrag = e.FileDragOver()
+	if files := e.DroppedFiles(); len(files) > 0 {
+		p.requestOpen(files[0])
+	}
+}
+
+// paint runs one frame: it moves the picture on, draws it, and asks for
+// another frame only while something moves. A still picture costs nothing,
+// which keeps the window free while files are dragged over it.
+func (p *player) paint(pt *ui.Painter, r ui.Rect) {
+	p.in.w, p.in.h = r.W, r.H
+	p.update()
+	p.in.step()
+	p.draw(pt, r)
+	if p.animating() {
+		pt.AnimationFrame()
+	} else {
+		p.armFade()
+	}
+}
+
+// animating reports whether the next frame has something new to show.
+func (p *player) animating() bool {
+	if p.fileDrag {
+		return false // let the drag image move about freely
+	}
+	if p.dragging || p.dragWin {
+		return true
+	}
+	if p.bar > 0.001 && p.bar < 0.999 {
+		return true
+	}
+	if time.Since(p.escAt) < escConfirm {
+		return true
+	}
+	if p.eof && !p.eofAt.IsZero() && time.Now().Before(p.eofAt) {
+		return true
+	}
+	return !p.empty && !p.paused && !p.eof
+}
+
+// armFade wakes the window when the bar's two seconds of stillness are up:
+// nothing else would draw the frame that starts fading it.
+func (p *player) armFade() {
+	if p.ctx == nil || p.bar <= 0 {
+		return
+	}
+	p.mu.Lock()
+	if p.fadeTimer != nil {
+		p.mu.Unlock()
+		return
+	}
+	d := time.Until(p.idle.Add(2 * time.Second))
+	if d < 0 {
+		d = 0
+	}
+	p.fadeTimer = time.AfterFunc(d, func() {
+		p.mu.Lock()
+		p.fadeTimer = nil
+		p.mu.Unlock()
+		p.ctx.Invalidate()
+	})
+	p.mu.Unlock()
+}
+
+// reset goes back to the window with no file in it, as when it starts.
+func (p *player) reset() {
+	if p.dec != nil {
+		p.dec.Close()
+		p.dec = nil
+	}
+	if p.ap != nil {
+		p.ap.Close()
+		p.ap = nil
+	}
+	if p.ad != nil {
+		p.ad.Close()
+		p.ad = nil
+	}
+	p.bm, p.img, p.pending = nil, nil, nil
+	p.empty, p.eof, p.paused = true, false, false
+	p.eofAt = time.Time{}
+	p.bar, p.shown, p.dropped = 0, 0, 0
+	p.base, p.started = 0, time.Now()
+	if p.full {
+		p.toggleFullscreen()
+	}
+	if p.win != nil {
+		p.win.SetContentSize(emptyW, emptyH)
+		p.center()
+	}
+	logf_("reset to empty")
+}
+
+// center puts the window in the middle of the work area of the monitor it
+// is on.
+func (p *player) center() {
+	if p.win == nil {
+		return
+	}
+	m, ok := workAreaOf(p.win.NativeHandle())
+	if !ok {
+		return
+	}
+	r, ok := windowRect(p.win.NativeHandle())
+	if !ok {
+		return
+	}
+	w, h := r.Right-r.Left, r.Bottom-r.Top
+	setWindowPos(p.win.NativeHandle(), 0,
+		m.Left+(m.Right-m.Left-w)/2, m.Top+(m.Bottom-m.Top-h)/2,
+		0, 0, swpNoSize|swpNoZOrder|swpNoActivate)
 }
 
 func (p *player) drawCentered(pt *ui.Painter, r ui.Rect, s string, size float32, c ui.Color) {
