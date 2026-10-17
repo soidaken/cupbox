@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -848,23 +849,49 @@ func (p *player) keepOnScreen() {
 		swpNoSize|swpNoZOrder|swpNoActivate)
 }
 
-// drawSubtitle paints the line centered above the bar, on a dim band so it
-// reads over a bright picture too.
-func (p *player) drawSubtitle(pt *ui.Painter, r ui.Rect, line string) {
-	const size = 24
+// drawSubtitle paints the cue centered above the bar: every line centered
+// in x, the block centered as a whole. A shadow, not a background, keeps
+// white text readable over a white picture.
+func (p *player) drawSubtitle(pt *ui.Painter, r ui.Rect, text string) {
+	const (
+		size   = 24
+		gap    = 2
+		bottom = barHeight + 44
+	)
 	maxW := r.W * 0.8
-	span := ui.Span{Text: line, Size: size, Color: ui.RGBA(255, 255, 255, 0.97)}
-	tw, th := pt.MeasureText(maxW, span)
-	// Clear of the bar and the clock above it, whether they show or not.
-	const bottom = barHeight + 44
-	x := r.X + (r.W-tw)/2
-	y := r.Y + r.H - bottom - th
-	// A shadow, not a background: white text alone disappears over a white
-	// picture.
-	shadow := span
-	shadow.Color = ui.RGBA(0, 0, 0, 0.45)
-	pt.RichText(x+1, y+1, maxW, shadow)
-	pt.RichText(x, y, maxW, span)
+	col := ui.RGBA(255, 255, 255, 0.97)
+	shadow := ui.RGBA(0, 0, 0, 0.45)
+	span := ui.Span{Text: text, Size: size, Color: col}
+
+	lines := strings.Split(text, "\n")
+	widths := make([]float32, len(lines))
+	heights := make([]float32, len(lines))
+	blockH := float32(0)
+	for i, line := range lines {
+		w, h := pt.MeasureText(0, ui.Span{Text: line, Size: size})
+		if w > maxW {
+			// Too long to center line by line: let the layout wrap it.
+			tw, th := pt.MeasureText(maxW, span)
+			x := r.X + (r.W-tw)/2
+			y := r.Y + r.H - bottom - th
+			sh := span
+			sh.Color = shadow
+			pt.RichText(x+1, y+1, maxW, sh)
+			pt.RichText(x, y, maxW, span)
+			return
+		}
+		widths[i], heights[i] = w, h
+		blockH += h
+	}
+	blockH += gap * float32(len(lines)-1)
+
+	y := r.Y + r.H - bottom - blockH
+	for i, line := range lines {
+		x := r.X + (r.W-widths[i])/2
+		pt.Text(x+1, y+1, line, size, shadow)
+		pt.Text(x, y, line, size, col)
+		y += heights[i] + gap
+	}
 }
 
 func (p *player) drawCentered(pt *ui.Painter, r ui.Rect, s string, size float32, c ui.Color) {
