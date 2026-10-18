@@ -27,7 +27,8 @@ const (
 	barHeight = 32
 	emptyW    = 960
 	emptyH    = 640
-	dragSlop  = 4 // pixels a press may wander before it moves the window
+	dragSlop  = 4                      // pixels a press may wander before it moves the window
+	hideAfter = 100 * time.Millisecond // how long the overlay stays after the pointer rests
 )
 
 // iconPNG is the window icon: the same picture the executable carries, so
@@ -817,7 +818,7 @@ func (p *player) update() {
 	}
 	p.lastX, p.lastY, p.lastW, p.lastH = x, y, w, h
 	target := float32(0)
-	if now.Sub(p.idle) < time.Second || p.dragging {
+	if now.Sub(p.idle) < hideAfter || p.dragging {
 		target = 1
 	}
 	p.bar += (target - p.bar) * 0.25
@@ -1026,7 +1027,7 @@ func (p *player) armFade() {
 		p.mu.Unlock()
 		return
 	}
-	d := time.Until(p.idle.Add(time.Second))
+	d := time.Until(p.idle.Add(hideAfter))
 	if d < 0 {
 		d = 0
 	}
