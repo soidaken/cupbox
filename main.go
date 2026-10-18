@@ -314,19 +314,20 @@ type player struct {
 	volume float64
 
 	// overlay
-	bar      float32
-	idle     time.Time
-	dragging bool
-	overBar  bool
-	overUI   bool
-	wasOver  bool
-	anchorX  float32
-	anchorY  float32
-	volAt    time.Time
-	iconBmp  *ui.Bitmap
-	lastTap  time.Time
-	keyHeld  bool
-	keyLast  time.Time
+	bar           float32
+	idle          time.Time
+	dragging      bool
+	overBar       bool
+	overUI        bool
+	pointerInside bool
+	wasOver       bool
+	anchorX       float32
+	anchorY       float32
+	volAt         time.Time
+	iconBmp       *ui.Bitmap
+	lastTap       time.Time
+	keyHeld       bool
+	keyLast       time.Time
 
 	lastX float32
 	lastY float32
@@ -724,8 +725,19 @@ func (p *player) toggleFullscreen() {
 
 func (p *player) update() {
 	now := time.Now()
-	x, y, over := p.in.Pointer()
+	x, y, _ := p.in.Pointer()
 	w, h := p.in.Size()
+	// Where the pointer really is: the last move event stays where it was
+	// after the pointer leaves the window, and a pointer that stops over the
+	// overlay never sends another one.
+	over := false
+	if p.win != nil {
+		if c, ok := cursorPos(); ok {
+			if r, ok := windowRect(p.win.NativeHandle()); ok {
+				over = c.X >= r.Left && c.X < r.Right && c.Y >= r.Top && c.Y < r.Bottom
+			}
+		}
+	}
 
 	if p.in.Pressed(ui.KeyEscape) {
 		if p.full {
@@ -824,7 +836,7 @@ func (p *player) update() {
 	// a hand resting on a mouse still reports a pixel of movement now and
 	// then, which must not keep the overlay alive.
 	if over {
-		moved := math.Hypot(float64(x-p.anchorX), float64(y-p.anchorY)) > moveSlop
+		moved := movedFar(x, y, p.anchorX, p.anchorY)
 		if !p.wasOver || moved {
 			p.idle = now
 		}
@@ -834,10 +846,7 @@ func (p *player) update() {
 	}
 	p.wasOver = over
 	p.lastX, p.lastY, p.lastW, p.lastH = x, y, w, h
-	target := float32(0)
-	if now.Sub(p.idle) < hideAfter || p.dragging || p.overUI {
-		target = 1
-	}
+	target := overlayTarget(p.overUI, p.dragging, now.Sub(p.idle))
 	p.bar += (target - p.bar) * 0.25
 	if p.bar < 0.01 {
 		p.bar = 0
@@ -967,6 +976,21 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 	}
 }
 
+// overlayTarget says whether the overlay shows: over the UI, while dragging,
+// or within hideAfter of the last activity.
+func overlayTarget(overUI, dragging bool, idle time.Duration) float32 {
+	if overUI || dragging || idle < hideAfter {
+		return 1
+	}
+	return 0
+}
+
+// movedFar reports whether the pointer travelled far enough to count as
+// activity: a hand resting on a mouse reports a pixel or two now and then.
+func movedFar(x, y, ax, ay float32) bool {
+	return math.Hypot(float64(x-ax), float64(y-ay)) > moveSlop
+}
+
 // drawEmpty paints the window with nothing in it: the mark, what to do, and
 // what it plays.
 func (p *player) drawEmpty(pt *ui.Painter, r ui.Rect) {
@@ -1044,9 +1068,12 @@ func (p *player) armFade() {
 		p.mu.Unlock()
 		return
 	}
-	d := time.Until(p.idle.Add(hideAfter))
-	if d < 0 {
-		d = 0
+	d := 150 * time.Millisecond // look again while the pointer may be over the overlay
+	if !p.overUI {
+		d = time.Until(p.idle.Add(hideAfter))
+		if d < 0 {
+			d = 0
+		}
 	}
 	p.fadeTimer = time.AfterFunc(d, func() {
 		p.mu.Lock()

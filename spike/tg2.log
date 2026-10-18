@@ -1,0 +1,16 @@
+place 2225x1252 at 167,70
+first frame after 80ms
+target=1 bar=0.00 over=true overUI=false idle=0s x=1660 y=342 ax=1660 ay=342 h=1252
+target=0 bar=0.92 over=true overUI=false idle=100ms x=1661 y=341 ax=1660 ay=342 h=1252
+target=1 bar=0.01 over=true overUI=false idle=0s x=1665 y=345 ax=1665 ay=345 h=1252
+target=0 bar=0.87 over=true overUI=false idle=116ms x=1668 y=346 ax=1665 ay=345 h=1252
+target=1 bar=0.49 over=true overUI=false idle=0s x=1670 y=349 ax=1670 ay=349 h=1252
+target=0 bar=0.98 over=true overUI=false idle=100ms x=1670 y=361 ax=1670 ay=361 h=1252
+target=1 bar=0.55 over=true overUI=false idle=0s x=1674 y=366 ax=1674 ay=366 h=1252
+target=0 bar=1.00 over=true overUI=false idle=117ms x=1663 y=467 ax=1663 ay=469 h=1252
+target=1 bar=0.42 over=true overUI=false idle=0s x=1649 y=468 ax=1649 ay=468 h=1252
+target=0 bar=1.00 over=true overUI=false idle=118ms x=1911 y=670 ax=1911 ay=669 h=1252
+target=1 bar=0.42 over=true overUI=false idle=0s x=2107 y=733 ax=2107 ay=733 h=1440
+target=0 bar=0.99 over=true overUI=false idle=100ms x=2354 y=821 ax=2354 ay=821 h=1440
+target=1 bar=0.07 over=true overUI=false idle=0s x=2371 y=821 ax=2371 ay=821 h=1440
+target=0 bar=1.00 over=true overUI=false idle=116ms x=1200 y=700 ax=1200 ay=700 h=1440

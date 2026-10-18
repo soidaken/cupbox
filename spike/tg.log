@@ -1,0 +1,12 @@
+place 2225x1252 at 167,70
+first frame after 80ms
+target=1 bar=0.00 over=true overUI=false idle=0s
+target=0 bar=1.00 over=true overUI=false idle=117ms
+target=1 bar=0.56 over=true overUI=false idle=0s
+target=0 bar=0.92 over=true overUI=false idle=100ms
+target=1 bar=0.01 over=true overUI=false idle=0s
+target=0 bar=0.97 over=true overUI=false idle=117ms
+target=1 bar=0.31 over=true overUI=false idle=0s
+target=0 bar=0.91 over=true overUI=false idle=115ms
+target=1 bar=0.09 over=true overUI=false idle=0s
+target=0 bar=0.88 over=true overUI=false idle=117ms
