@@ -107,6 +107,10 @@ func main() {
 		winW, winH = info.Width, info.Height
 	}
 
+	if bmp, err := ui.DecodeBitmap(iconPNG); err == nil {
+		p.iconBmp = bmp
+	}
+
 	mygo.App.WhenReady(func() {
 		w, h := winW, winH
 		if p.dec != nil {
@@ -310,6 +314,9 @@ type player struct {
 	bar      float32
 	idle     time.Time
 	dragging bool
+	overBar  bool
+	volAt    time.Time
+	iconBmp  *ui.Bitmap
 	lastTap  time.Time
 	keyHeld  bool
 	keyLast  time.Time
@@ -743,6 +750,7 @@ func (p *player) update() {
 	}
 	if p.in.Pressed(ui.KeySpace) {
 		p.setPaused(!p.paused)
+		p.idle = now
 	}
 
 	// Arrow keys: a tap steps two seconds; holding repeats the step as
@@ -772,10 +780,12 @@ func (p *player) update() {
 		p.volume = min(max(p.volume-float64(dy)/100*0.05, 0), 1)
 		p.ap.SetVolume(p.volume)
 		p.idle = now
+		p.volAt = now
 		logf_("volume %.0f%%", p.volume*100)
 	}
 
 	inBar := over && y >= h-barHeight
+	p.overBar = inBar
 	if p.in.PointerPressed(0) {
 		if inBar {
 			p.dragging = true
@@ -847,7 +857,7 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 	pt.Fill(r, ui.RGBA(0, 0, 0, 1), 0)
 
 	if p.empty {
-		p.drawCentered(pt, r, "把视频拖到这里，或双击视频文件播放", 16, ui.RGBA(255, 255, 255, 0.55))
+		p.drawEmpty(pt, r)
 		return
 	}
 
@@ -872,31 +882,92 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 		return
 	}
 	a := p.bar
-	bar := ui.Rect{X: r.X, Y: r.Y + r.H - barHeight, W: r.W, H: barHeight}
-	pt.Fill(bar, ui.RGBA(255, 255, 255, 0.35*a), 0)
+	hit := ui.Rect{X: r.X, Y: r.Y + r.H - barHeight, W: r.W, H: barHeight}
+
+	// A scrim, not a slab: the picture stays visible under the bar, and the
+	// text reads over a white frame.
+	// The scrim stops below the subtitles, which keep a background of
+	// their own: none.
+	pt.FillGradient(ui.Rect{X: r.X, Y: r.Y + r.H - 72, W: r.W, H: 72},
+		ui.LinearGradient{From: ui.RGBA(0, 0, 0, 0), To: ui.RGBA(0, 0, 0, 0.55*a), Angle: 180}, 0)
+
+	const inset = 20
+	th := float32(3)
+	if p.overBar || p.dragging {
+		th = 5
+	}
+	if p.dragging {
+		th = 6
+	}
+	cy := hit.Y + hit.H - 20
+	track := ui.Rect{X: hit.X + inset, Y: cy - th/2, W: hit.W - 2*inset, H: th}
+	pt.Fill(track, ui.RGBA(255, 255, 255, 0.26*a), th/2)
 
 	frac := float64(p.position()) / float64(p.duration())
 	frac = min(max(frac, 0), 1)
+	brand := ui.RGBA(255, 214, 10, 0.95*a)
 	if frac > 0 {
-		pt.Fill(ui.Rect{X: bar.X, Y: bar.Y, W: float32(frac) * bar.W, H: bar.H},
-			ui.RGBA(255, 238, 150, 0.90*a), 0)
+		pt.Fill(ui.Rect{X: track.X, Y: track.Y, W: float32(frac) * track.W, H: th}, brand, th/2)
+	}
+	if p.overBar || p.dragging {
+		x := track.X + float32(frac)*track.W
+		pt.Fill(ui.Rect{X: x - 7, Y: cy - 7, W: 14, H: 14}, ui.RGBA(255, 214, 10, 0.16*a), 7)
+		pt.Fill(ui.Rect{X: x - 4.5, Y: cy - 4.5, W: 9, H: 9}, brand, 4.5)
 	}
 
-	s := clock(p.position()) + " / " + clock(p.duration())
-	col := ui.RGBA(255, 255, 255, 0.75*a)
-	tw, th := pt.MeasureText(0, ui.Span{Text: s, Size: 13, Color: col})
-	x := r.X + (r.W-tw)/2
-	pt.Text(x, bar.Y-th-8, s, 13, col)
+	// The clock: elapsed is the lead, the whole is quiet behind it.
+	cur := clock(p.position())
+	tot := clock(p.duration())
+	first := []ui.Span{
+		{Text: cur, Size: 15, Weight: 600, Color: ui.RGBA(255, 255, 255, 0.92*a)},
+		{Text: "  /  ", Size: 13, Color: ui.RGBA(255, 255, 255, 0.30*a)},
+		{Text: tot, Size: 13, Color: ui.RGBA(255, 255, 255, 0.42*a)},
+	}
+	tw, thh := pt.MeasureText(0, first...)
+	ty := hit.Y - thh - 10 + (1-a)*6
+	pt.RichText(r.X+(r.W-tw)/2, ty, 0, first...)
 
-	// The volume follows the clock, and only shows with it.
-	vol := fmt.Sprintf("%.0f%%", p.volume*100)
-	vw, _ := pt.MeasureText(0, ui.Span{Text: vol, Size: 13})
-	pt.Text(x+tw+14, bar.Y-th-8, vol, 13, ui.RGBA(255, 255, 255, 0.6*a))
-	_ = vw
+	// The volume sits at the right edge, at the clock's baseline.
+	flash := float32(time.Since(p.volAt)) / float32(700*time.Millisecond)
+	flash = min(max(1-flash, 0), 1)
+	vol := fmt.Sprintf("%d%%", int(p.volume*100+0.5))
+	vspan := []ui.Span{{Text: vol, Size: 12, Color: ui.RGBA(255, 255, 255, (0.45+0.45*flash)*a)}}
+	vw, vh := pt.MeasureText(0, vspan...)
+	pt.RichText(r.X+r.W-inset-vw, ty+thh-vh, 0, vspan...)
+
+	// Dragging shows the time the pointer is over.
+	if p.dragging {
+		label := clock(time.Duration(float64(p.lastX-inset-hit.X) / float64(track.W) * float64(p.duration())))
+		span := []ui.Span{{Text: label, Size: 11, Color: ui.RGBA(255, 255, 255, 0.95*a)}}
+		lw, lh := pt.MeasureText(0, span...)
+		bw, bh := lw+18, lh+10
+		bx := float32(p.lastX) - bw/2
+		bx = min(max(bx, r.X+8), r.X+r.W-8-bw)
+		by := hit.Y - 72
+		pt.Fill(ui.Rect{X: bx, Y: by, W: bw, H: bh}, ui.RGBA(0, 0, 0, 0.62*a), 8)
+		pt.RichText(bx+9, by+5, 0, span...)
+	}
 }
 
-// view builds the window's picture: one element that fills it, takes the
-// input, and paints on demand instead of on a clock of its own.
+// drawEmpty paints the window with nothing in it: the mark, what to do, and
+// what it plays.
+func (p *player) drawEmpty(pt *ui.Painter, r ui.Rect) {
+	if p.iconBmp != nil {
+		const d = 88
+		dst := ui.Rect{X: r.X + (r.W-d)/2, Y: r.Y + r.H/2 - d/2 - 58, W: d, H: d}
+		pt.ImageRegion(p.iconBmp, ui.Rect{}, dst, ui.ImageOptions{Tint: ui.RGBA(255, 255, 255, 0.25)})
+	}
+	title := []ui.Span{{Text: "把视频拖到这里", Size: 17, Color: ui.RGBA(255, 255, 255, 0.62)}}
+	tw, th := pt.MeasureText(0, title...)
+	ty := r.Y + r.H/2 + 18
+	pt.RichText(r.X+(r.W-tw)/2, ty, 0, title...)
+
+	formats := []ui.Span{{Text: "MP4 · MKV · AVI · WebM · TS · WMV · MOV · FLV",
+		Size: 12, Color: ui.RGBA(255, 255, 255, 0.30)}}
+	fw, _ := pt.MeasureText(0, formats...)
+	pt.RichText(r.X+(r.W-fw)/2, ty+th+10, 0, formats...)
+}
+
 func (p *player) view(c *ui.Context) {
 	p.mu.Lock()
 	p.ctx = c
