@@ -316,6 +316,7 @@ type player struct {
 	idle     time.Time
 	dragging bool
 	overBar  bool
+	overUI   bool
 	volAt    time.Time
 	iconBmp  *ui.Bitmap
 	lastTap  time.Time
@@ -787,6 +788,9 @@ func (p *player) update() {
 
 	inBar := over && y >= h-barHeight
 	p.overBar = inBar
+	// The overlay stays while the pointer rests over it: the bar, the clock
+	// above it, and the scrim they sit on.
+	p.overUI = over && y >= h-(barHeight+40)
 	if p.in.PointerPressed(0) {
 		if inBar {
 			p.dragging = true
@@ -818,7 +822,7 @@ func (p *player) update() {
 	}
 	p.lastX, p.lastY, p.lastW, p.lastH = x, y, w, h
 	target := float32(0)
-	if now.Sub(p.idle) < hideAfter || p.dragging {
+	if now.Sub(p.idle) < hideAfter || p.dragging || p.overUI {
 		target = 1
 	}
 	p.bar += (target - p.bar) * 0.25
