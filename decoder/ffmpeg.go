@@ -28,9 +28,11 @@ typedef struct {
     int subStream;
     int subCount;
     char *subText[256];
+    unsigned char *subPix[256];
+    int subW[256], subH[256], subX[256], subY[256];
     int64_t subStart[256];
     int64_t subEnd[256];
-    int subASS[256];
+    int subASS[256]; // 0 plain text, 1 ASS text, 2 bitmap
     int subErr;
 } cd_t;
 
@@ -38,24 +40,78 @@ static void cd_clear_subs(cd_t *c) {
     for (int i = 0; i < c->subCount; i++) {
         free(c->subText[i]);
         c->subText[i] = NULL;
+        free(c->subPix[i]);
+        c->subPix[i] = NULL;
     }
     c->subCount = 0;
 }
 
-static void cd_push_sub(cd_t *c, int64_t start, int64_t end, int ass, const char *text) {
-    if (c->subCount == 256) { // drop the oldest: the queue is only a few seconds long
+// cd_slot makes room for one more event, dropping the oldest when full.
+static int cd_slot(cd_t *c) {
+    if (c->subCount == 256) {
         free(c->subText[0]);
+        free(c->subPix[0]);
         memmove(c->subText, c->subText + 1, sizeof(char *) * 255);
+        memmove(c->subPix, c->subPix + 1, sizeof(unsigned char *) * 255);
+        memmove(c->subW, c->subW + 1, sizeof(int) * 255);
+        memmove(c->subH, c->subH + 1, sizeof(int) * 255);
+        memmove(c->subX, c->subX + 1, sizeof(int) * 255);
+        memmove(c->subY, c->subY + 1, sizeof(int) * 255);
         memmove(c->subStart, c->subStart + 1, sizeof(int64_t) * 255);
         memmove(c->subEnd, c->subEnd + 1, sizeof(int64_t) * 255);
         memmove(c->subASS, c->subASS + 1, sizeof(int) * 255);
         c->subCount = 255;
     }
-    c->subText[c->subCount] = strdup(text);
-    c->subStart[c->subCount] = start;
-    c->subEnd[c->subCount] = end;
-    c->subASS[c->subCount] = ass;
-    c->subCount++;
+    int i = c->subCount++;
+    c->subText[i] = NULL;
+    c->subPix[i] = NULL;
+    c->subW[i] = c->subH[i] = c->subX[i] = c->subY[i] = 0;
+    return i;
+}
+
+// cd_push_bmp queues a picture subtitle: already RGBA, at x, y of the
+// video's frame.
+static void cd_push_bmp(cd_t *c, int64_t start, int64_t end, int x, int y, int w, int h, unsigned char *rgba) {
+    for (int i = c->subCount - 1; i >= 0 && i >= c->subCount - 64; i--) {
+        if (c->subASS[i] == 2 && c->subStart[i] == start && c->subEnd[i] == end &&
+            c->subX[i] == x && c->subY[i] == y && c->subW[i] == w && c->subH[i] == h) {
+            free(rgba); // read again after a seek
+            return;
+        }
+    }
+    int i = cd_slot(c);
+    c->subStart[i] = start;
+    c->subEnd[i] = end;
+    c->subASS[i] = 2;
+    c->subPix[i] = rgba;
+    c->subW[i] = w;
+    c->subH[i] = h;
+    c->subX[i] = x;
+    c->subY[i] = y;
+}
+
+static void cd_push_sub(cd_t *c, int64_t start, int64_t end, int ass, const char *text) {
+    for (int i = c->subCount - 1; i >= 0 && i >= c->subCount - 64; i--) {
+        if (c->subASS[i] != 2 && c->subStart[i] == start && c->subEnd[i] == end &&
+            c->subText[i] && !strcmp(c->subText[i], text)) {
+            return; // read again after a seek
+        }
+    }
+    int i = cd_slot(c);
+    c->subText[i] = strdup(text);
+    c->subStart[i] = start;
+    c->subEnd[i] = end;
+    c->subASS[i] = ass;
+}
+
+// cd_close_last_bmp ends the picture subtitle still showing at t: picture
+// subtitles stay until the next display set, not for a fixed time.
+static void cd_close_last_bmp(cd_t *c, int64_t t) {
+    for (int i = c->subCount - 1; i >= 0; i--) {
+        if (c->subASS[i] != 2) continue;
+        if (c->subEnd[i] > t) c->subEnd[i] = t;
+        return;
+    }
 }
 
 // cd_decode_sub turns one subtitle packet into events. Subtitle packets carry
@@ -80,9 +136,34 @@ static void cd_decode_sub(cd_t *c, AVPacket *pkt) {
         start += sub.start_display_time;
         end = start + (sub.end_display_time - sub.start_display_time);
     }
-    if (end <= start) end = start + 3000;
+    if (end <= start || end - start > 60000) end = start + 3000; // closed by the next event
+    if (sub.num_rects == 0) { // a display set that clears the screen
+        cd_close_last_bmp(c, start);
+        avsubtitle_free(&sub);
+        return;
+    }
     for (unsigned i = 0; i < sub.num_rects; i++) {
         AVSubtitleRect *r = sub.rects[i];
+        if (r->type == SUBTITLE_BITMAP && r->data[0] && r->data[1] && r->w > 0 && r->h > 0) {
+            uint32_t *pal = (uint32_t *)r->data[1];
+            unsigned char *rgba = malloc((size_t)r->w * r->h * 4);
+            if (rgba) {
+                for (int yy = 0; yy < r->h; yy++) {
+                    const uint8_t *src = r->data[0] + (size_t)yy * r->linesize[0];
+                    unsigned char *dst = rgba + (size_t)yy * r->w * 4;
+                    for (int xx = 0; xx < r->w; xx++) {
+                        uint32_t v = pal[src[xx]];
+                        dst[xx * 4 + 0] = (v >> 16) & 0xFF; // red
+                        dst[xx * 4 + 1] = (v >> 8) & 0xFF;  // green
+                        dst[xx * 4 + 2] = v & 0xFF;         // blue
+                        dst[xx * 4 + 3] = (v >> 24) & 0xFF; // alpha
+                    }
+                }
+                cd_close_last_bmp(c, start);
+                cd_push_bmp(c, start, end, r->x, r->y, r->w, r->h, rgba);
+            }
+            continue;
+        }
         const char *text = r->ass ? r->ass : r->text;
         if (!text || !*text) continue;
         cd_push_sub(c, start, end, r->ass ? 1 : 0, text);
@@ -206,25 +287,58 @@ static int cd_next(cd_t *c, uint8_t *dst, int64_t *ptsMs, int64_t minMs, char *e
     }
 }
 
+// cd_prime_subs decodes the subtitles that show at ms, starting 15 seconds
+// before it: the packets of a line that began earlier than the picture's
+// keyframe would otherwise never be decoded, and stepping into the middle
+// of a line would show nothing.
+static void cd_prime_subs(cd_t *c, int64_t ms) {
+    if (!c->sc || c->subStream < 0) return;
+    AVStream *st = c->fc->streams[c->subStream];
+    int64_t back = ms - 15000;
+    if (back < 0) back = 0;
+    int64_t ts = av_rescale_q(back, (AVRational){1, 1000}, st->time_base);
+    if (av_seek_frame(c->fc, c->subStream, ts, AVSEEK_FLAG_BACKWARD) < 0) return;
+    avcodec_flush_buffers(c->sc);
+    AVPacket *pkt = av_packet_alloc();
+    if (!pkt) return;
+    while (av_read_frame(c->fc, pkt) >= 0) {
+        AVStream *ps = c->fc->streams[pkt->stream_index];
+        int64_t pms = 0;
+        if (pkt->pts != AV_NOPTS_VALUE) pms = av_rescale_q(pkt->pts, ps->time_base, (AVRational){1, 1000});
+        if (pkt->stream_index == c->subStream) cd_decode_sub(c, pkt);
+        av_packet_unref(pkt);
+        if (pms > ms + 1000) break;
+    }
+    av_packet_free(&pkt);
+}
+
 static int cd_seek(cd_t *c, int64_t ms) {
+    cd_clear_subs(c);
+    if (c->sc) cd_prime_subs(c, ms);
     AVStream *st = c->fc->streams[c->stream];
     int64_t ts = av_rescale_q(ms, (AVRational){1, 1000}, st->time_base);
     int e = av_seek_frame(c->fc, c->stream, ts, AVSEEK_FLAG_BACKWARD);
     if (e < 0) return e;
     avcodec_flush_buffers(c->cc);
     if (c->sc) avcodec_flush_buffers(c->sc);
-    cd_clear_subs(c);
     c->draining = 0;
     return 0;
 }
 static int cd_has_subs(cd_t *c) { return c->sc != NULL; }
 static int cd_sub_codec(cd_t *c) { return c->subStream >= 0 ? (int)c->fc->streams[c->subStream]->codecpar->codec_id : -1; }
 static int cd_sub_err(cd_t *c) { return c->subStream >= 0 ? c->subErr : -1; }
+static int cd_sub_width(cd_t *c) { return c->subStream >= 0 ? c->fc->streams[c->subStream]->codecpar->width : 0; }
+static int cd_sub_height(cd_t *c) { return c->subStream >= 0 ? c->fc->streams[c->subStream]->codecpar->height : 0; }
 static int cd_sub_count(cd_t *c) { return c->subCount; }
 static int64_t cd_sub_start(cd_t *c, int i) { return c->subStart[i]; }
 static int64_t cd_sub_end(cd_t *c, int i) { return c->subEnd[i]; }
 static int cd_sub_is_ass(cd_t *c, int i) { return c->subASS[i]; }
 static const char *cd_sub_text(cd_t *c, int i) { return c->subText[i]; }
+static const unsigned char *cd_sub_pix(cd_t *c, int i) { return c->subPix[i]; }
+static int cd_sub_w(cd_t *c, int i) { return c->subW[i]; }
+static int cd_sub_h(cd_t *c, int i) { return c->subH[i]; }
+static int cd_sub_x(cd_t *c, int i) { return c->subX[i]; }
+static int cd_sub_y(cd_t *c, int i) { return c->subY[i]; }
 static const char *cd_sub_header(cd_t *c, int *len) {
     if (!c->sc || !c->sc->subtitle_header) { *len = 0; return NULL; }
     *len = c->sc->subtitle_header_size;
@@ -233,8 +347,13 @@ static const char *cd_sub_header(cd_t *c, int *len) {
 static void cd_sub_take(cd_t *c, int n) {
     if (n <= 0) return;
     if (n > c->subCount) n = c->subCount;
-    for (int i = 0; i < n; i++) { free(c->subText[i]); c->subText[i] = NULL; }
+    for (int i = 0; i < n; i++) { free(c->subText[i]); c->subText[i] = NULL; free(c->subPix[i]); c->subPix[i] = NULL; }
     memmove(c->subText, c->subText + n, sizeof(char *) * (c->subCount - n));
+    memmove(c->subPix, c->subPix + n, sizeof(unsigned char *) * (c->subCount - n));
+    memmove(c->subW, c->subW + n, sizeof(int) * (c->subCount - n));
+    memmove(c->subH, c->subH + n, sizeof(int) * (c->subCount - n));
+    memmove(c->subX, c->subX + n, sizeof(int) * (c->subCount - n));
+    memmove(c->subY, c->subY + n, sizeof(int) * (c->subCount - n));
     memmove(c->subStart, c->subStart + n, sizeof(int64_t) * (c->subCount - n));
     memmove(c->subEnd, c->subEnd + n, sizeof(int64_t) * (c->subCount - n));
     memmove(c->subASS, c->subASS + n, sizeof(int) * (c->subCount - n));
@@ -333,11 +452,21 @@ func (d *Decoder) SubtitleCodecID() int { return int(C.cd_sub_codec(d.c)) }
 // SubtitleError returns why the subtitle track could not be opened.
 func (d *Decoder) SubtitleError() int { return int(C.cd_sub_err(d.c)) }
 
-// SubtitleEvent is one subtitle of a track, and when it shows.
+// SubtitleSize returns the canvas picture subtitles were laid out on, which
+// is not always the video's size; zero when unknown.
+func (d *Decoder) SubtitleSize() (w, h int) {
+	return int(C.cd_sub_width(d.c)), int(C.cd_sub_height(d.c))
+}
+
+// SubtitleEvent is one subtitle of a track, and when it shows: either text,
+// or a picture at X, Y of the video's frame.
 type SubtitleEvent struct {
 	Start, End time.Duration
 	Text       string
 	ASS        bool
+
+	Bitmap     []byte // RGBA, W×H, at X, Y of the video when not nil
+	W, H, X, Y int
 }
 
 // Subtitles returns the subtitle events decoded since the last call: each
@@ -350,12 +479,27 @@ func (d *Decoder) Subtitles() []SubtitleEvent {
 	}
 	out := make([]SubtitleEvent, 0, n)
 	for i := 0; i < n; i++ {
-		out = append(out, SubtitleEvent{
-			Start: time.Duration(C.cd_sub_start(d.c, C.int(i))) * time.Millisecond,
-			End:   time.Duration(C.cd_sub_end(d.c, C.int(i))) * time.Millisecond,
-			Text:  C.GoString(C.cd_sub_text(d.c, C.int(i))),
-			ASS:   C.cd_sub_is_ass(d.c, C.int(i)) != 0,
-		})
+		idx := C.int(i)
+		ev := SubtitleEvent{
+			Start: time.Duration(C.cd_sub_start(d.c, idx)) * time.Millisecond,
+			End:   time.Duration(C.cd_sub_end(d.c, idx)) * time.Millisecond,
+		}
+		switch C.cd_sub_is_ass(d.c, idx) {
+		case 2:
+			ev.W = int(C.cd_sub_w(d.c, idx))
+			ev.H = int(C.cd_sub_h(d.c, idx))
+			ev.X = int(C.cd_sub_x(d.c, idx))
+			ev.Y = int(C.cd_sub_y(d.c, idx))
+			if pix := C.cd_sub_pix(d.c, idx); pix != nil && ev.W > 0 && ev.H > 0 {
+				ev.Bitmap = C.GoBytes(unsafe.Pointer(pix), C.int(ev.W*ev.H*4))
+			}
+		case 1:
+			ev.Text = C.GoString(C.cd_sub_text(d.c, idx))
+			ev.ASS = true
+		default:
+			ev.Text = C.GoString(C.cd_sub_text(d.c, idx))
+		}
+		out = append(out, ev)
 	}
 	C.cd_sub_take(d.c, C.int(n))
 	return out

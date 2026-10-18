@@ -11,6 +11,8 @@ ASF/WMV, OGG, WAV, MP3, FLAC and AAC (ADTS); these video decoders: H.264,
 HEVC, AV1, VP9, VP8, VP6, MPEG-1/2, MPEG-4 Part 2, VC-1, WMV1/2/3,
 MS-MPEG4, FLV, MJPEG and H.263; and these audio decoders: AAC, MP3, Opus,
 Vorbis, FLAC, ALAC, AC-3, E-AC-3, DTS, TrueHD, WMA1/2, MP2, PCM, APE,
-WavPack, AMR-NB/WB and Speex.
+WavPack, AMR-NB/WB and Speex; and these subtitle decoders: ASS, SubRip,
+mov_text, WebVTT, PGS, DVD and DVB subtitles. It links zlib for the
+compressed subtitle tracks of Matroska files.
 
 FFmpeg source: https://github.com/FFmpeg/FFmpeg (release/8.0)

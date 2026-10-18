@@ -5,7 +5,7 @@ Unicode true
 
 !define APPNAME    "Cupbox"
 !define APPVER     "0.1.0"
-!define PROGID     "Cupbox.mp4"
+!define PROGID     "Cupbox.Video"
 !define PUBLISHER  "Cupbox"
 
 Name "${APPNAME}"
@@ -38,6 +38,18 @@ VIAddVersionKey "LegalCopyright"  "${PUBLISHER}"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
+
+
+; Every extension Cupbox can play, offered in "Open with" and in the
+; default apps settings.
+!macro AssocExt EXT
+  WriteRegStr HKCU "Software\Classes\${EXT}\OpenWithProgids" "${PROGID}" ""
+  WriteRegStr HKCU "Software\${APPNAME}\Capabilities\FileAssociations" "${EXT}" "${PROGID}"
+!macroend
+!macro UnassocExt EXT
+  DeleteRegValue HKCU "Software\Classes\${EXT}\OpenWithProgids" "${PROGID}"
+  DeleteRegValue HKCU "Software\${APPNAME}\Capabilities\FileAssociations" "${EXT}"
+!macroend
 
 Function OpenDefaultApps
   ExecShell "open" "ms-settings:defaultapps"
@@ -78,18 +90,38 @@ Section "Cupbox" SecMain
   WriteRegStr HKCU "Software\Classes\Applications\cupbox.exe" "FriendlyAppName" "${APPNAME}"
   WriteRegStr HKCU "Software\Classes\Applications\cupbox.exe\shell\open\command" "" '"$INSTDIR\cupbox.exe" "%1"'
 
-  ; MP4 handler
+  ; The video types Cupbox handles
   WriteRegStr HKCU "Software\Classes\${PROGID}" "" "Cupbox 视频"
   WriteRegStr HKCU "Software\Classes\${PROGID}" "FriendlyTypeName" "Cupbox 视频"
   WriteRegStr HKCU "Software\Classes\${PROGID}\DefaultIcon" "" "$INSTDIR\cupbox.exe,0"
   WriteRegStr HKCU "Software\Classes\${PROGID}\shell\open\command" "" '"$INSTDIR\cupbox.exe" "%1"'
-  WriteRegStr HKCU "Software\Classes\.mp4\OpenWithProgids" "${PROGID}" ""
 
   ; What Settings > Default apps reads
   WriteRegStr HKCU "Software\${APPNAME}\Capabilities" "ApplicationName"        "${APPNAME}"
   WriteRegStr HKCU "Software\${APPNAME}\Capabilities" "ApplicationDescription" "极简视频播放器：双击就播，没有界面。"
-  WriteRegStr HKCU "Software\${APPNAME}\Capabilities\FileAssociations" ".mp4" "${PROGID}"
   WriteRegStr HKCU "Software\RegisteredApplications" "${APPNAME}" "Software\${APPNAME}\Capabilities"
+
+  !insertmacro AssocExt ".mp4"
+  !insertmacro AssocExt ".m4v"
+  !insertmacro AssocExt ".mkv"
+  !insertmacro AssocExt ".webm"
+  !insertmacro AssocExt ".avi"
+  !insertmacro AssocExt ".mov"
+  !insertmacro AssocExt ".flv"
+  !insertmacro AssocExt ".ts"
+  !insertmacro AssocExt ".m2ts"
+  !insertmacro AssocExt ".mts"
+  !insertmacro AssocExt ".mpg"
+  !insertmacro AssocExt ".mpeg"
+  !insertmacro AssocExt ".vob"
+  !insertmacro AssocExt ".wmv"
+  !insertmacro AssocExt ".asf"
+  !insertmacro AssocExt ".ogv"
+
+  ; An earlier version used one ProgID per type: clear it away
+  DeleteRegKey HKCU "Software\Classes\Cupbox.mp4"
+  DeleteRegValue HKCU "Software\Classes\.mp4\OpenWithProgids" "Cupbox.mp4"
+
 
   CreateDirectory "$SMPROGRAMS\${APPNAME}"
   CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" "$INSTDIR\cupbox.exe"
@@ -115,7 +147,22 @@ Section "Uninstall"
   Delete "$DESKTOP\${APPNAME}.lnk"
 
   DeleteRegKey HKCU "Software\Classes\${PROGID}"
-  DeleteRegValue HKCU "Software\Classes\.mp4\OpenWithProgids" "${PROGID}"
+  !insertmacro UnassocExt ".mp4"
+  !insertmacro UnassocExt ".m4v"
+  !insertmacro UnassocExt ".mkv"
+  !insertmacro UnassocExt ".webm"
+  !insertmacro UnassocExt ".avi"
+  !insertmacro UnassocExt ".mov"
+  !insertmacro UnassocExt ".flv"
+  !insertmacro UnassocExt ".ts"
+  !insertmacro UnassocExt ".m2ts"
+  !insertmacro UnassocExt ".mts"
+  !insertmacro UnassocExt ".mpg"
+  !insertmacro UnassocExt ".mpeg"
+  !insertmacro UnassocExt ".vob"
+  !insertmacro UnassocExt ".wmv"
+  !insertmacro UnassocExt ".asf"
+  !insertmacro UnassocExt ".ogv"
   DeleteRegKey HKCU "Software\Classes\Applications\cupbox.exe"
   DeleteRegKey HKCU "Software\${APPNAME}"
   DeleteRegValue HKCU "Software\RegisteredApplications" "${APPNAME}"

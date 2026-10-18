@@ -91,6 +91,7 @@ func main() {
 
 		p.subs = loadSubtitles(path)
 		p.subStyle = parseASSHeader(dec.SubtitleHeader())
+		p.subW, p.subH = dec.SubtitleSize()
 		p.embedded = append(p.embedded, dec.Subtitles()...)
 
 		// Audio is the clock: the picture follows what is heard.
@@ -286,8 +287,11 @@ type player struct {
 	win  *mygo.Window
 	subs *subtitles // a sidecar .srt next to the video
 
-	embedded []decoder.SubtitleEvent // the file's own subtitle track
-	subStyle assStyle
+	embedded   []decoder.SubtitleEvent // the file's own subtitle track
+	subStyle   assStyle
+	subW, subH int        // the canvas picture subtitles are laid out on
+	subBmp     *ui.Bitmap // the picture subtitle being shown
+	subBmpAt   string
 
 	pending *decoder.Frame
 	eof     bool
@@ -549,6 +553,7 @@ func (p *player) load(path string) {
 	p.dec, p.info, p.ad, p.ap = dec, info, nil, nil
 	p.subs = loadSubtitles(path)
 	p.subStyle = parseASSHeader(dec.SubtitleHeader())
+	p.subW, p.subH = dec.SubtitleSize()
 	p.embedded = append(p.embedded[:0], dec.Subtitles()...)
 	if aerr == nil {
 		p.ad = ad
@@ -848,11 +853,15 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 
 	pos := p.position()
 	if line := p.subs.at(pos); line != "" {
-		p.drawSubtitle(pt, r, line)
+		p.drawSubtitle(pt, p.videoRect(r), line)
 	} else {
 		for _, ev := range p.embedded {
 			if ev.Start <= pos+30*time.Millisecond && pos < ev.End {
-				p.drawEmbedded(pt, r, ev)
+				if ev.Bitmap != nil {
+					p.drawBitmapSub(pt, r, ev)
+				} else {
+					p.drawEmbedded(pt, p.videoRect(r), ev)
+				}
 			}
 		}
 	}
@@ -1064,6 +1073,43 @@ func (p *player) drawSubtitle(pt *ui.Painter, r ui.Rect, text string) {
 		pt.Text(x, y, line, size, col)
 		y += heights[i] + gap
 	}
+}
+
+// videoRect is where the picture shows inside r: the window when they have
+// the same shape, and letterboxed when not, as in fullscreen on another
+// display's shape.
+func (p *player) videoRect(r ui.Rect) ui.Rect {
+	vw, vh := float32(p.info.Width), float32(p.info.Height)
+	if vw <= 0 || vh <= 0 || r.W <= 0 || r.H <= 0 {
+		return r
+	}
+	k := min(r.W/vw, r.H/vh)
+	w, h := vw*k, vh*k
+	return ui.Rect{X: r.X + (r.W-w)/2, Y: r.Y + (r.H-h)/2, W: w, H: h}
+}
+
+// drawBitmapSub paints a picture subtitle, as Blu-ray and DVD carry, in the
+// place of the video it was made for.
+func (p *player) drawBitmapSub(pt *ui.Painter, r ui.Rect, ev decoder.SubtitleEvent) {
+	key := fmt.Sprint(ev.Start, ev.End, ev.X, ev.Y, ev.W, ev.H, len(ev.Bitmap))
+	if p.subBmp == nil || p.subBmpAt != key {
+		img := &image.RGBA{Pix: ev.Bitmap, Stride: ev.W * 4, Rect: image.Rect(0, 0, ev.W, ev.H)}
+		p.subBmp = ui.NewBitmap(img)
+		p.subBmpAt = key
+	}
+	v := p.videoRect(r)
+	cw, ch := p.subW, p.subH
+	if cw <= 0 || ch <= 0 {
+		cw, ch = p.info.Width, p.info.Height
+	}
+	sx, sy := v.W/float32(cw), v.H/float32(ch)
+	dst := ui.Rect{
+		X: v.X + float32(ev.X)*sx,
+		Y: v.Y + float32(ev.Y)*sy,
+		W: float32(ev.W) * sx,
+		H: float32(ev.H) * sy,
+	}
+	pt.Image(p.subBmp, dst, ui.FillBox)
 }
 
 // drawEmbedded paints one subtitle of the file's own track, in the place

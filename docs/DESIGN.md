@@ -124,12 +124,14 @@ t=0     进程启动
 
 ## 8.1 字幕
 
-- 两种来源：**文件自带字幕轨**（MKV 的 ASS/SSA、MKV/MP4 里的 SRT 与 mov_text）和外挂 SRT（与视频同目录同名，大小写都试）。两样都有时优先外挂。
+- 来源：**文件自带字幕轨**（MKV 的 ASS/SSA、MKV/MP4 里的 SRT 与 mov_text、PGS/DVD/DVB 图形字幕）和外挂 SRT（与视频同目录同名，大小写都试）。两样都有时优先外挂。
 - 编码：先按 UTF-8 读；不是合法 UTF-8 时按 GB18030 解码（覆盖 GBK/GB2312），中文常见的老字幕不会乱码。
 - 解析：标准 SubRip 块；`<i>`、`<b>`、`{n8}` 之类的标签剥掉，保留换行；时间戳兼容 `,` 与 `.` 毫秒分隔。
 - 渲染：系统字体，**不加背景条**，只在右下各偏移 1px 叠一层 `rgba(0,0,0,0.45)` 的阴影保证白画面也能看清；每行各自在 X 方向居中，底边距窗口底 76px（32px 进度条 + 时间行 + 间距），进度条显隐都不会盖住。
 - 内嵌字幕：解析 ASS 的对齐（`\an1`–`\an9`）、字号（`\fs`）、颜色（`\c&HBBGGRR&` 与样式 PrimaryColour）、换行（`\N`），字号按 `窗口高 / PlayResY` 缩放；其它特效标签（`\pos`、`\move`、旋转、卡拉 OK）先忽略。
-- 已知限制：seek 到某句字幕中间时，因为关键帧之前的字幕包不会被解码，要等下一句才开始显示；连续播放不受影响。
+- 图形字幕：PGS / DVD / DVB 解出的调色板位图在 C 侧转成 RGBA，按字幕流的画布尺寸（PGS 常见 1920×1080，与视频尺寸不同）缩放到画面位置；一张图持续到下一个 display set，清屏事件会结束它。
+- seek：跳转前先把字幕上下文回退 15 秒、解码到目标点，因此拖到某句中间也能立刻看到这句，而不是等下一句。
+- 图形字幕的细节（PGS 的淡入淡出、DVD 的强制字幕标记）暂不处理。
 - 播放中每帧重绘，字幕切换误差小于一帧；暂停时静止，seek 后立即重画。
 
 ## 8.2 图标与版本信息
@@ -194,11 +196,11 @@ M1 剩余：光标随浮层隐藏；暂停状态下 seek 后的首帧刷新复�
 
 ## 10.2 打包
 
-- **FFmpeg 最小构建**：源码 `release/8.0`，MSYS2 + mingw64 编译，`--disable-everything` 后只开上面 D2 列出的容器/解码器/解析器，LGPL v2.1，不开 x86asm（机器上没有 nasm）。DLL 合计 **10MB**（原通用构建 165MB）。
+- **FFmpeg 最小构建**：源码 `release/8.0`，MSYS2 + mingw64 编译，`--disable-everything` 后只开上面 D2 列出的容器/解码器/解析器，另加字幕解码器（ass/subrip/movtext/webvtt/pgssub/dvdsub/dvbsub）与 zlib（MKV 压缩字幕轨需要），LGPL v2.1，不开 x86asm（机器上没有 nasm）。DLL 合计 **10MB**（原通用构建 165MB）。
 - **打开失败**：弹一个原生 `MessageBox`（标题 Cupbox、一行错误），不再静默退出。
 - **安装包**：NSIS，`packaging/cupbox.nsi`，**按用户安装**（`%LOCALAPPDATA%\Programs\Cupbox`，不需要管理员权限）。产物 `dist/Cupbox-Setup-0.1.0.exe` 约 **7.7MB**。
 - **便携版**：`dist/Cupbox-0.1.0-portable.zip` 约 **10MB**，解压即用。
-- **关联注册**（HKCU）：ProgID `Cupbox.mp4`（含 `shell\open\command`、`DefaultIcon`）、`.mp4\OpenWithProgids`、`Applications\cupbox.exe`、`Software\Cupbox\Capabilities` + `RegisteredApplications`，卸载时全部清除。
+- **关联注册**（HKCU）：ProgID `Cupbox.Video`（含 `shell\open\command`、`DefaultIcon`），16 种扩展（mp4/m4v/mkv/webm/avi/mov/flv/ts/m2ts/mts/mpg/mpeg/vob/wmv/asf/ogv）都写进 `OpenWithProgids` 与 `Capabilities\FileAssociations`，另有 `Applications\cupbox.exe`、`RegisteredApplications`；卸载时全部清除，并顺手清掉旧版本用过的 `Cupbox.mp4`。
 - **默认播放器**：Windows 10/11 禁止安装程序静默设置默认程序，只能注册“可成为默认”的资格。安装完成页提供默认勾选的按钮，直接打开 `ms-settings:defaultapps` 让用户选一次；右键“打开方式 → 始终使用”同样生效。
 - 重新打包：`powershell packaging/build.ps1`。
 
