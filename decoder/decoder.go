@@ -28,3 +28,7 @@ type Frame struct {
 
 // ErrEOF is returned by Next after the last frame.
 var ErrEOF = errors.New("decoder: end of file")
+
+// ErrNoVideo is returned by Open for a file that has no picture, as an
+// audio file: Cupbox plays pictures, and ignores those.
+var ErrNoVideo = errors.New("decoder: no video stream")

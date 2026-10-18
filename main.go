@@ -67,11 +67,13 @@ func main() {
 	} else {
 		path := os.Args[1]
 		dec, info, err := decoder.Open(path)
+		if errors.Is(err, decoder.ErrNoVideo) || (err == nil && (info.Width == 0 || info.Height == 0)) {
+			// An audio file, or anything else without a picture: Cupbox
+			// plays pictures only, and says nothing.
+			os.Exit(0)
+		}
 		if err != nil {
 			fail(err.Error())
-		}
-		if info.Width == 0 || info.Height == 0 {
-			fail("no video")
 		}
 		p = &player{dec: dec, info: info, volume: 1, in: newInput()}
 		p.img = &image.RGBA{
@@ -523,8 +525,8 @@ func (p *player) requestOpen(path string) {
 // while nothing plays: a file dropped on a playing picture is ignored.
 func (p *player) load(path string) {
 	dec, info, err := decoder.Open(path)
-	if err == nil && (info.Width == 0 || info.Height == 0) {
-		err = errors.New("这个文件里没有视频")
+	if errors.Is(err, decoder.ErrNoVideo) || (err == nil && (info.Width == 0 || info.Height == 0)) {
+		return // audio only: dropped files with no picture are ignored
 	}
 	if err == nil {
 		if _, derr := dec.Next(); derr != nil {

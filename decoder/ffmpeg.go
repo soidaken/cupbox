@@ -385,7 +385,11 @@ func Open(path string) (*Decoder, Info, error) {
 	var c *C.cd_t
 	d := &Decoder{}
 	if rc := C.cd_open(cpath, &c, &d.errbuf[0], C.int(len(d.errbuf))); rc < 0 {
-		return nil, Info{}, fmt.Errorf("decoder: %s", C.GoString(&d.errbuf[0]))
+		msg := C.GoString(&d.errbuf[0])
+		if msg == "no video stream" {
+			return nil, Info{}, ErrNoVideo
+		}
+		return nil, Info{}, fmt.Errorf("decoder: %s", msg)
 	}
 	d.c = c
 	d.info = Info{
