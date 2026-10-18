@@ -4,6 +4,7 @@ package main
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"image"
 	"os"
@@ -134,8 +135,19 @@ func main() {
 }
 
 func fail(msg string) {
-	fmt.Fprintln(os.Stderr, "cupbox:", msg)
+	logf_("fatal: %s", msg)
+	alert(msg)
 	os.Exit(1)
+}
+
+// alert shows a one-line message in a native box: a windowed program has
+// nowhere else to say what went wrong.
+func alert(msg string) {
+	text, _ := syscall.UTF16PtrFromString(msg)
+	title, _ := syscall.UTF16PtrFromString("Cupbox")
+	const mbIconError, mbSetForeground, mbTopMost = 0x10, 0x10000, 0x40000
+	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(text)), uintptr(unsafe.Pointer(title)),
+		mbIconError|mbSetForeground|mbTopMost)
 }
 
 func fitToScreen(w, h int) (int, int) {
@@ -181,6 +193,7 @@ var (
 	procCloseHandle          = kernel32.NewProc("CloseHandle")
 	procSystemParametersInfo = user32.NewProc("SystemParametersInfoW")
 	procEnumWindows          = user32.NewProc("EnumWindows")
+	procMessageBoxW          = user32.NewProc("MessageBoxW")
 	dwmapi                   = syscall.NewLazyDLL("dwmapi.dll")
 	procDwmSetAttribute      = dwmapi.NewProc("DwmSetWindowAttribute")
 )
@@ -504,13 +517,20 @@ func (p *player) requestOpen(path string) {
 // while nothing plays: a file dropped on a playing picture is ignored.
 func (p *player) load(path string) {
 	dec, info, err := decoder.Open(path)
-	if err != nil || info.Width == 0 || info.Height == 0 {
-		logf_("open ignored: %v", err)
-		return
+	if err == nil && (info.Width == 0 || info.Height == 0) {
+		err = errors.New("这个文件里没有视频")
 	}
-	if _, err := dec.Next(); err != nil {
-		dec.Close()
+	if err == nil {
+		if _, derr := dec.Next(); derr != nil {
+			err = derr
+		}
+	}
+	if err != nil {
+		if dec != nil {
+			dec.Close()
+		}
 		logf_("open ignored: %v", err)
+		alert("打不开这个文件：" + err.Error())
 		return
 	}
 	ad, aerr := decoder.OpenAudio(path)

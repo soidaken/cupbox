@@ -192,7 +192,8 @@ M1 剩余：光标随浮层隐藏；暂停状态下 seek 后的首帧刷新复�
 
 ## 10.2 打包
 
-- **FFmpeg 最小构建**：源码 `release/8.0`，MSYS2 + mingw64 编译，`--disable-everything` 只留 MOV/MP4 解封装、H.264/AAC 解码、H.264 解析、file 协议、swscale、swresample，LGPL v2.1，不开 x86asm（机器上没有 nasm）。DLL 合计 **5.3MB**（原通用构建 165MB）。
+- **FFmpeg 最小构建**：源码 `release/8.0`，MSYS2 + mingw64 编译，`--disable-everything` 只留 MOV/MP4 解封装、file 协议、swscale/swresample，解码器只开 H.264/HEVC/AV1/VP9/MPEG-4 与 AAC/MP3/Opus/FLAC/AC-3/E-AC-3/ALAC，LGPL v2.1，不开 x86asm（机器上没有 nasm）。DLL 合计 **8.7MB**（原通用构建 165MB）。
+- **打开失败**：弹一个原生 `MessageBox`（标题 Cupbox、一行错误），不再静默退出。
 - **安装包**：NSIS，`packaging/cupbox.nsi`，**按用户安装**（`%LOCALAPPDATA%\Programs\Cupbox`，不需要管理员权限）。产物 `dist/Cupbox-Setup-0.1.0.exe` 约 **7.7MB**。
 - **便携版**：`dist/Cupbox-0.1.0-portable.zip` 约 **10MB**，解压即用。
 - **关联注册**（HKCU）：ProgID `Cupbox.mp4`（含 `shell\open\command`、`DefaultIcon`）、`.mp4\OpenWithProgids`、`Applications\cupbox.exe`、`Software\Cupbox\Capabilities` + `RegisteredApplications`，卸载时全部清除。
