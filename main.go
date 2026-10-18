@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,7 @@ const (
 	emptyW    = 960
 	emptyH    = 640
 	dragSlop  = 4                      // pixels a press may wander before it moves the window
+	moveSlop  = 5                      // pixels the pointer must travel to count as activity
 	hideAfter = 100 * time.Millisecond // how long the overlay stays after the pointer rests
 )
 
@@ -317,6 +319,9 @@ type player struct {
 	dragging bool
 	overBar  bool
 	overUI   bool
+	wasOver  bool
+	anchorX  float32
+	anchorY  float32
 	volAt    time.Time
 	iconBmp  *ui.Bitmap
 	lastTap  time.Time
@@ -815,11 +820,19 @@ func (p *player) update() {
 	}
 	p.dragIfHeld()
 
-	// The bar and the clock show when the mouse moves, and fade after two
-	// seconds of stillness.
-	if over && (x != p.lastX || y != p.lastY) {
-		p.idle = now
+	// Activity is entering the window, or moving more than a few pixels:
+	// a hand resting on a mouse still reports a pixel of movement now and
+	// then, which must not keep the overlay alive.
+	if over {
+		moved := math.Hypot(float64(x-p.anchorX), float64(y-p.anchorY)) > moveSlop
+		if !p.wasOver || moved {
+			p.idle = now
+		}
+		if !p.wasOver || moved || p.anchorX == 0 && p.anchorY == 0 {
+			p.anchorX, p.anchorY = x, y
+		}
 	}
+	p.wasOver = over
 	p.lastX, p.lastY, p.lastW, p.lastH = x, y, w, h
 	target := float32(0)
 	if now.Sub(p.idle) < hideAfter || p.dragging || p.overUI {
