@@ -49,7 +49,7 @@ static int cd_open(const char *path, cd_t **out, char *err, int errlen) {
     if (!c->cc) { snprintf(err, errlen, "no memory"); cd_close(c); return -1; }
     e = avcodec_parameters_to_context(c->cc, st->codecpar);
     if (e < 0) { av_strerror(e, err, errlen); cd_close(c); return -1; }
-    c->cc->thread_count = 0; // as many threads as the decoder likes
+    c->cc->thread_count = 8; // enough for 1080p, and far less memory than one per core
     c->cc->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     e = avcodec_open2(c->cc, dec, NULL);
     if (e < 0) { av_strerror(e, err, errlen); cd_close(c); return -1; }

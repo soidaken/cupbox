@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -100,24 +101,19 @@ func main() {
 		winW, winH = info.Width, info.Height
 	}
 
-	if !mygo.App.RequestSingleInstanceLock() {
-		return // another Cupbox is running: it got our command line
-	}
-	mygo.App.OnSecondInstance(func(args []string, _ string) {
-		if len(args) > 0 {
-			p.requestOpen(args[0])
-		}
-	})
-
 	mygo.App.WhenReady(func() {
 		w, h := winW, winH
 		if p.dec != nil {
 			w, h = fitToScreen(p.info.Width, p.info.Height)
 		}
+		x, y := cascadePosition(w, h)
+		logf_("place %dx%d at %d,%d", w, h, x, y)
 		win := mygo.NewWindow(mygo.WindowOptions{
 			Title:          "Cupbox",
 			Width:          w,
 			Height:         h,
+			X:              x,
+			Y:              y,
 			UseContentSize: true,
 			Frameless:      true,
 			DisableResize:  true,
@@ -164,24 +160,29 @@ func fitToScreen(w, h int) (int, int) {
 // Win32 window control: dragging, fullscreen on the current monitor, and
 // asking which monitor that is.
 var (
-	user32              = syscall.NewLazyDLL("user32.dll")
-	procSetWindowPos    = user32.NewProc("SetWindowPos")
-	procGetCursorPos    = user32.NewProc("GetCursorPos")
-	procGetWindowRect   = user32.NewProc("GetWindowRect")
-	procMonitorFromWin  = user32.NewProc("MonitorFromWindow")
-	procGetMonitorInfoW = user32.NewProc("GetMonitorInfoW")
-	procGetWindowLong   = user32.NewProc("GetWindowLongPtrW")
-	procSetWindowLong   = user32.NewProc("SetWindowLongPtrW")
-	procForeground      = user32.NewProc("GetForegroundWindow")
-	procWindowThread    = user32.NewProc("GetWindowThreadProcessId")
-	procAttachInput     = user32.NewProc("AttachThreadInput")
-	procBringToTop      = user32.NewProc("BringWindowToTop")
-	procSetForeground   = user32.NewProc("SetForegroundWindow")
-	procSetFocus        = user32.NewProc("SetFocus")
-	kernel32            = syscall.NewLazyDLL("kernel32.dll")
-	procCurrentThread   = kernel32.NewProc("GetCurrentThreadId")
-	dwmapi              = syscall.NewLazyDLL("dwmapi.dll")
-	procDwmSetAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
+	user32                   = syscall.NewLazyDLL("user32.dll")
+	procSetWindowPos         = user32.NewProc("SetWindowPos")
+	procGetCursorPos         = user32.NewProc("GetCursorPos")
+	procGetWindowRect        = user32.NewProc("GetWindowRect")
+	procMonitorFromWin       = user32.NewProc("MonitorFromWindow")
+	procGetMonitorInfoW      = user32.NewProc("GetMonitorInfoW")
+	procGetWindowLong        = user32.NewProc("GetWindowLongPtrW")
+	procSetWindowLong        = user32.NewProc("SetWindowLongPtrW")
+	procForeground           = user32.NewProc("GetForegroundWindow")
+	procWindowThread         = user32.NewProc("GetWindowThreadProcessId")
+	procAttachInput          = user32.NewProc("AttachThreadInput")
+	procBringToTop           = user32.NewProc("BringWindowToTop")
+	procSetForeground        = user32.NewProc("SetForegroundWindow")
+	procSetFocus             = user32.NewProc("SetFocus")
+	kernel32                 = syscall.NewLazyDLL("kernel32.dll")
+	procCurrentThread        = kernel32.NewProc("GetCurrentThreadId")
+	procOpenProcess          = kernel32.NewProc("OpenProcess")
+	procQueryImageName       = kernel32.NewProc("QueryFullProcessImageNameW")
+	procCloseHandle          = kernel32.NewProc("CloseHandle")
+	procSystemParametersInfo = user32.NewProc("SystemParametersInfoW")
+	procEnumWindows          = user32.NewProc("EnumWindows")
+	dwmapi                   = syscall.NewLazyDLL("dwmapi.dll")
+	procDwmSetAttribute      = dwmapi.NewProc("DwmSetWindowAttribute")
 )
 
 const (
@@ -337,6 +338,86 @@ func (p *player) position() time.Duration {
 		return p.ap.Position()
 	}
 	return p.base + time.Since(p.started)
+}
+
+// cascadePosition returns where a window of w×h goes: 30px right and down
+// from the last Cupbox window on screen, so that windows do not hide each
+// other, centred when it is the only one.
+func cascadePosition(w, h int) (int, int) {
+	work, ok := primaryWorkArea()
+	if !ok {
+		return 0, 0
+	}
+	ww, hh := int32(w), int32(h)
+	center := func() (int32, int32) {
+		return work.Left + (work.Right-work.Left-ww)/2, work.Top + (work.Bottom-work.Top-hh)/2
+	}
+	last, found := lastCupboxWindow()
+	var x, y int32
+	if found {
+		x, y = last.Left+30, last.Top+30
+	} else {
+		x, y = center()
+	}
+	if x+ww > work.Right || y+hh > work.Bottom {
+		x, y = center()
+	}
+	if x < work.Left {
+		x = work.Left
+	}
+	if y < work.Top {
+		y = work.Top
+	}
+	return int(x), int(y)
+}
+
+// primaryWorkArea returns the main display's area without the taskbar, in
+// screen pixels.
+func primaryWorkArea() (rect, bool) {
+	var r rect
+	ok, _, _ := procSystemParametersInfo.Call(0x0030 /* SPI_GETWORKAREA */, 0, uintptr(unsafe.Pointer(&r)), 0)
+	return r, ok != 0
+}
+
+// lastCupboxWindow returns the lowest-right window of another Cupbox
+// process, the one a new window steps away from.
+func lastCupboxWindow() (rect, bool) {
+	self := uint32(os.Getpid())
+	var best rect
+	found := false
+	cb := syscall.NewCallback(func(hwnd uintptr, _ uintptr) uintptr {
+		var pid uint32
+		procWindowThread.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
+		if pid == 0 || pid == self || !cupboxProcess(pid) {
+			return 1
+		}
+		// EnumWindows walks the z-order from the front: the first Cupbox
+		// window is the one in front, and the one to step away from.
+		if r, ok := windowRect(hwnd); ok && r.Right > r.Left && r.Bottom > r.Top {
+			best, found = r, true
+			return 0
+		}
+		return 1
+	})
+	procEnumWindows.Call(cb, 0)
+	return best, found
+}
+
+// cupboxProcess reports whether pid runs cupbox.exe.
+func cupboxProcess(pid uint32) bool {
+	h, _, _ := procOpenProcess.Call(0x1000 /* PROCESS_QUERY_LIMITED_INFORMATION */, 0, uintptr(pid))
+	if h == 0 {
+		return false
+	}
+	defer procCloseHandle.Call(h)
+	buf := make([]uint16, 1024)
+	n := uint32(len(buf))
+	ok, _, _ := procQueryImageName.Call(h, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&n)))
+	if ok == 0 || n == 0 {
+		return false
+	}
+	name := syscall.UTF16ToString(buf[:n])
+	return strings.EqualFold(filepath.Base(name), "cupbox.exe")
 }
 
 // raise brings the window to the front and gives it the keyboard, as
