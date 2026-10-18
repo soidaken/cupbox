@@ -23,11 +23,10 @@ import (
 )
 
 const (
-	barHeight  = 32
-	emptyW     = 960
-	emptyH     = 640
-	escConfirm = 2 * time.Second
-	dragSlop   = 4 // pixels a press may wander before it moves the window
+	barHeight = 32
+	emptyW    = 960
+	emptyH    = 640
+	dragSlop  = 4 // pixels a press may wander before it moves the window
 )
 
 // iconPNG is the window icon: the same picture the executable carries, so
@@ -317,9 +316,6 @@ type player struct {
 	dragMoved  bool
 	dragFrom   point
 	winFrom    rect
-
-	// Esc asks twice before quitting.
-	escAt time.Time
 
 	// fileDrag is true while files dragged from another app hover.
 	fileDrag bool
@@ -701,15 +697,10 @@ func (p *player) update() {
 	w, h := p.in.Size()
 
 	if p.in.Pressed(ui.KeyEscape) {
-		switch {
-		case p.empty:
-			mygo.App.Quit() // nothing to lose: one press quits the empty window
-		case p.full:
-			p.toggleFullscreen()
-		case now.Sub(p.escAt) < escConfirm:
+		if p.full {
+			p.toggleFullscreen() // a fullscreen picture goes back to its window
+		} else {
 			mygo.App.Quit()
-		default:
-			p.escAt = now
 		}
 		return
 	}
@@ -839,10 +830,6 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 		p.drawSubtitle(pt, r, line)
 	}
 
-	if time.Since(p.escAt) < escConfirm {
-		p.drawCentered(pt, r, "再按一次 Esc 退出", 15, ui.RGBA(255, 255, 255, 0.7))
-	}
-
 	if p.bar <= 0 {
 		return
 	}
@@ -911,9 +898,6 @@ func (p *player) animating() bool {
 		return true
 	}
 	if p.bar > 0.001 && p.bar < 0.999 {
-		return true
-	}
-	if time.Since(p.escAt) < escConfirm {
 		return true
 	}
 	if p.eof && !p.eofAt.IsZero() && time.Now().Before(p.eofAt) {
