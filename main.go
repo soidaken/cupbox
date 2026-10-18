@@ -172,11 +172,20 @@ var (
 	procGetMonitorInfoW = user32.NewProc("GetMonitorInfoW")
 	procGetWindowLong   = user32.NewProc("GetWindowLongPtrW")
 	procSetWindowLong   = user32.NewProc("SetWindowLongPtrW")
+	procForeground      = user32.NewProc("GetForegroundWindow")
+	procWindowThread    = user32.NewProc("GetWindowThreadProcessId")
+	procAttachInput     = user32.NewProc("AttachThreadInput")
+	procBringToTop      = user32.NewProc("BringWindowToTop")
+	procSetForeground   = user32.NewProc("SetForegroundWindow")
+	procSetFocus        = user32.NewProc("SetFocus")
+	kernel32            = syscall.NewLazyDLL("kernel32.dll")
+	procCurrentThread   = kernel32.NewProc("GetCurrentThreadId")
 	dwmapi              = syscall.NewLazyDLL("dwmapi.dll")
 	procDwmSetAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
 )
 
 const (
+	swpNoMove       = 0x0002
 	swpNoSize       = 0x0001
 	swpNoZOrder     = 0x0004
 	swpNoActivate   = 0x0010
@@ -330,6 +339,34 @@ func (p *player) position() time.Duration {
 	return p.base + time.Since(p.started)
 }
 
+// raise brings the window to the front and gives it the keyboard, as
+// starting a picture should. Windows lets a program started by another one
+// take the foreground only while attached to the foreground thread.
+func (p *player) raise() {
+	if p.win == nil {
+		return
+	}
+	hwnd := p.win.NativeHandle()
+	// Top of the z-order, without staying above other windows.
+	setWindowPos(hwnd, hwndTop, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoActivate)
+	setWindowPos(hwnd, hwndNotTop, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoActivate)
+
+	fg, _, _ := procForeground.Call()
+	ft, _, _ := procWindowThread.Call(fg, 0)
+	mt, _, _ := procCurrentThread.Call()
+	attached := false
+	if ft != 0 && ft != mt {
+		procAttachInput.Call(mt, ft, 1)
+		attached = true
+	}
+	procBringToTop.Call(hwnd)
+	procSetForeground.Call(hwnd)
+	procSetFocus.Call(hwnd)
+	if attached {
+		procAttachInput.Call(mt, ft, 0)
+	}
+}
+
 func (p *player) startWindowDrag() {
 	if p.win == nil || p.full {
 		return
@@ -432,6 +469,7 @@ func (p *player) load(path string) {
 		p.win.SetContentSize(w, h)
 		p.keepOnScreen()
 	}
+	p.raise()
 	logf_("loaded %s %dx%d", path, info.Width, info.Height)
 }
 
@@ -681,6 +719,9 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 		p.idle = time.Now()
 		if ws := mygo.Windows(); len(ws) > 0 {
 			p.win = ws[0]
+		}
+		if !p.empty {
+			p.raise()
 		}
 		logf_("first frame after %v", time.Since(t0).Round(time.Millisecond))
 	}
