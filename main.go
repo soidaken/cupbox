@@ -368,11 +368,18 @@ func (p *player) dragIfHeld() {
 	}
 }
 
-// requestOpen asks for path to be played, if nothing plays yet.
+// requestOpen asks for path to be played. It is called from the drop
+// target and from a second instance, off the UI thread, so it wakes the
+// window: an idle one (empty, or paused) draws no frames of its own, and
+// without a frame the file would never be opened.
 func (p *player) requestOpen(path string) {
 	p.mu.Lock()
 	p.openPath = path
+	ctx := p.ctx
 	p.mu.Unlock()
+	if ctx != nil {
+		ctx.Invalidate()
+	}
 }
 
 // load opens path and plays it. It is called on the UI thread, and only
@@ -724,7 +731,9 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 // view builds the window's picture: one element that fills it, takes the
 // input, and paints on demand instead of on a clock of its own.
 func (p *player) view(c *ui.Context) {
+	p.mu.Lock()
 	p.ctx = c
+	p.mu.Unlock()
 	e := ui.Box(c).Fill().Focusable().AutoFocus()
 	e.HandleInput(p.in.handle)
 	e.Draw(p.paint)
