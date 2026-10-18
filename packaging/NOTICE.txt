@@ -5,9 +5,12 @@ separate set of DLLs under the GNU Lesser General Public License,
 version 2.1 or later. The FFmpeg license is in
 LICENSE-FFmpeg-LGPLv2.1.txt next to this file.
 
-The FFmpeg build shipped here is configured without GPL components:
-the MOV/MP4 demuxer, the file protocol, swscale and swresample, and only
-these decoders: H.264, HEVC, AV1, VP9, MPEG-4 Part 2, AAC, MP3, Opus,
-FLAC, AC-3, E-AC-3 and ALAC.
+The FFmpeg build shipped here is configured without GPL components. It
+carries these containers: MP4/MOV, MKV/WebM, AVI, FLV, MPEG-TS, MPEG-PS,
+ASF/WMV, OGG, WAV, MP3, FLAC and AAC (ADTS); these video decoders: H.264,
+HEVC, AV1, VP9, VP8, VP6, MPEG-1/2, MPEG-4 Part 2, VC-1, WMV1/2/3,
+MS-MPEG4, FLV, MJPEG and H.263; and these audio decoders: AAC, MP3, Opus,
+Vorbis, FLAC, ALAC, AC-3, E-AC-3, DTS, TrueHD, WMA1/2, MP2, PCM, APE,
+WavPack, AMR-NB/WB and Speex.
 
 FFmpeg source: https://github.com/FFmpeg/FFmpeg (release/8.0)

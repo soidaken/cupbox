@@ -192,13 +192,17 @@ M1 剩余：光标随浮层隐藏；暂停状态下 seek 后的首帧刷新复�
 
 ## 10.2 打包
 
-- **FFmpeg 最小构建**：源码 `release/8.0`，MSYS2 + mingw64 编译，`--disable-everything` 只留 MOV/MP4 解封装、file 协议、swscale/swresample，解码器只开 H.264/HEVC/AV1/VP9/MPEG-4 与 AAC/MP3/Opus/FLAC/AC-3/E-AC-3/ALAC，LGPL v2.1，不开 x86asm（机器上没有 nasm）。DLL 合计 **8.7MB**（原通用构建 165MB）。
+- **FFmpeg 最小构建**：源码 `release/8.0`，MSYS2 + mingw64 编译，`--disable-everything` 后只开上面 D2 列出的容器/解码器/解析器，LGPL v2.1，不开 x86asm（机器上没有 nasm）。DLL 合计 **10MB**（原通用构建 165MB）。
 - **打开失败**：弹一个原生 `MessageBox`（标题 Cupbox、一行错误），不再静默退出。
 - **安装包**：NSIS，`packaging/cupbox.nsi`，**按用户安装**（`%LOCALAPPDATA%\Programs\Cupbox`，不需要管理员权限）。产物 `dist/Cupbox-Setup-0.1.0.exe` 约 **7.7MB**。
 - **便携版**：`dist/Cupbox-0.1.0-portable.zip` 约 **10MB**，解压即用。
 - **关联注册**（HKCU）：ProgID `Cupbox.mp4`（含 `shell\open\command`、`DefaultIcon`）、`.mp4\OpenWithProgids`、`Applications\cupbox.exe`、`Software\Cupbox\Capabilities` + `RegisteredApplications`，卸载时全部清除。
 - **默认播放器**：Windows 10/11 禁止安装程序静默设置默认程序，只能注册“可成为默认”的资格。安装完成页提供默认勾选的按钮，直接打开 `ms-settings:defaultapps` 让用户选一次；右键“打开方式 → 始终使用”同样生效。
 - 重新打包：`powershell packaging/build.ps1`。
+
+### 下一步
+
+- **内嵌字幕**：MKV/MP4 里的 ASS/SSA 与 mov_text 字幕轨，走系统字体渲染，样式只取基础项（字体、大小、颜色、描边、行内换行）。外挂 SRT 已经有，内嵌是看剧的刚需。
 
 ## 11. 为什么不给 mygo 加纹理 API（v1）
 
