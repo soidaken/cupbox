@@ -26,9 +26,9 @@ VIAddVersionKey "LegalCopyright"  "${PUBLISHER}"
 !define MUI_UNICON "..\assets\icon.ico"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN
-!define MUI_FINISHPAGE_RUN_TEXT "打开 Windows 的“默认应用”设置，把 Cupbox 设为 .mp4 的默认播放器"
+!define MUI_FINISHPAGE_RUN_TEXT "现在打开“默认应用”设置"
 !define MUI_FINISHPAGE_RUN_FUNCTION OpenDefaultApps
-!define MUI_FINISHPAGE_TEXT "Cupbox 已安装。$\r$\n$\r$\nWindows 10/11 不允许安装程序直接改默认播放器，需要你在“默认应用”里选一次 .mp4：$\r$\n找到 Cupbox，或在 .mp4 的“更改默认应用”里选它。$\r$\n$\r$\n也可以右键任意 mp4 → 打开方式 → 选择其他应用 → Cupbox → 始终使用。"
+!define MUI_FINISHPAGE_TEXT "Cupbox 已安装。$\r$\n$\r$\nWindows 不允许安装程序代设默认播放器。请在“默认应用”里把 mp4、mkv 等视频格式指给 Cupbox；也可以右键任意视频 → 打开方式 → 始终使用。"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
