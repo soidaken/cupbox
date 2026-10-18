@@ -9,6 +9,7 @@ package decoder
 #include <libswscale/swscale.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 typedef struct {
     AVFormatContext *fc;
@@ -21,9 +22,77 @@ typedef struct {
     int64_t durationMs;
     double fps;
     int draining; // codec flushed, only buffered frames left
+
+    // Subtitles of the first subtitle track, as text ready to show.
+    AVCodecContext *sc;
+    int subStream;
+    int subCount;
+    char *subText[256];
+    int64_t subStart[256];
+    int64_t subEnd[256];
+    int subASS[256];
+    int subErr;
 } cd_t;
 
+static void cd_clear_subs(cd_t *c) {
+    for (int i = 0; i < c->subCount; i++) {
+        free(c->subText[i]);
+        c->subText[i] = NULL;
+    }
+    c->subCount = 0;
+}
+
+static void cd_push_sub(cd_t *c, int64_t start, int64_t end, int ass, const char *text) {
+    if (c->subCount == 256) { // drop the oldest: the queue is only a few seconds long
+        free(c->subText[0]);
+        memmove(c->subText, c->subText + 1, sizeof(char *) * 255);
+        memmove(c->subStart, c->subStart + 1, sizeof(int64_t) * 255);
+        memmove(c->subEnd, c->subEnd + 1, sizeof(int64_t) * 255);
+        memmove(c->subASS, c->subASS + 1, sizeof(int) * 255);
+        c->subCount = 255;
+    }
+    c->subText[c->subCount] = strdup(text);
+    c->subStart[c->subCount] = start;
+    c->subEnd[c->subCount] = end;
+    c->subASS[c->subCount] = ass;
+    c->subCount++;
+}
+
+// cd_decode_sub turns one subtitle packet into events. Subtitle packets carry
+// their text; the times come from the packet, since most decoders leave them
+// out.
+static void cd_decode_sub(cd_t *c, AVPacket *pkt) {
+    AVSubtitle sub = {0};
+    int got = 0;
+    if (avcodec_decode_subtitle2(c->sc, &sub, &got, pkt) < 0 || !got) {
+        avsubtitle_free(&sub);
+        return;
+    }
+    AVStream *st = c->fc->streams[c->subStream];
+    int64_t start = 0, end = 0;
+    if (pkt->pts != AV_NOPTS_VALUE) {
+        start = av_rescale_q(pkt->pts, st->time_base, (AVRational){1, 1000});
+    }
+    if (pkt->duration > 0) {
+        end = start + av_rescale_q(pkt->duration, st->time_base, (AVRational){1, 1000});
+    }
+    if (sub.end_display_time > sub.start_display_time) {
+        start += sub.start_display_time;
+        end = start + (sub.end_display_time - sub.start_display_time);
+    }
+    if (end <= start) end = start + 3000;
+    for (unsigned i = 0; i < sub.num_rects; i++) {
+        AVSubtitleRect *r = sub.rects[i];
+        const char *text = r->ass ? r->ass : r->text;
+        if (!text || !*text) continue;
+        cd_push_sub(c, start, end, r->ass ? 1 : 0, text);
+    }
+    avsubtitle_free(&sub);
+}
+
 static void cd_close(cd_t *c) {
+    cd_clear_subs(c);
+    if (c->sc) avcodec_free_context(&c->sc);
     if (c->sws) sws_freeContext(c->sws);
     if (c->frm) av_frame_free(&c->frm);
     if (c->pkt) av_packet_free(&c->pkt);
@@ -59,6 +128,20 @@ static int cd_open(const char *path, cd_t **out, char *err, int errlen) {
     if (st->duration > 0) c->durationMs = av_rescale_q(st->duration, st->time_base, (AVRational){1, 1000});
     AVRational fr = st->avg_frame_rate;
     if (fr.num > 0 && fr.den > 0) c->fps = av_q2d(fr);
+    c->subStream = av_find_best_stream(c->fc, AVMEDIA_TYPE_SUBTITLE, -1, -1, NULL, 0);
+    if (c->subStream >= 0) {
+        AVStream *ss = c->fc->streams[c->subStream];
+        const AVCodec *sdec = avcodec_find_decoder(ss->codecpar->codec_id);
+        if (!sdec) c->subErr = -1000;
+        if (sdec) {
+            c->sc = avcodec_alloc_context3(sdec);
+            if (c->sc) {
+                c->subErr = avcodec_parameters_to_context(c->sc, ss->codecpar);
+                if (c->subErr >= 0) c->subErr = avcodec_open2(c->sc, sdec, NULL);
+                if (c->subErr < 0) avcodec_free_context(&c->sc);
+            }
+        }
+    }
     c->pkt = av_packet_alloc();
     c->frm = av_frame_alloc();
     if (!c->pkt || !c->frm) { snprintf(err, errlen, "no memory"); cd_close(c); return -1; }
@@ -92,6 +175,9 @@ static int cd_next(cd_t *c, uint8_t *dst, int64_t *ptsMs, int64_t minMs, char *e
                     int s = avcodec_send_packet(c->cc, c->pkt);
                     av_packet_unref(c->pkt);
                     if (s < 0 && s != AVERROR(EAGAIN)) { av_strerror(s, err, errlen); return -1; }
+                } else if (c->pkt->stream_index == c->subStream && c->sc) {
+                    cd_decode_sub(c, c->pkt);
+                    av_packet_unref(c->pkt);
                 } else {
                     av_packet_unref(c->pkt);
                 }
@@ -126,8 +212,33 @@ static int cd_seek(cd_t *c, int64_t ms) {
     int e = av_seek_frame(c->fc, c->stream, ts, AVSEEK_FLAG_BACKWARD);
     if (e < 0) return e;
     avcodec_flush_buffers(c->cc);
+    if (c->sc) avcodec_flush_buffers(c->sc);
+    cd_clear_subs(c);
     c->draining = 0;
     return 0;
+}
+static int cd_has_subs(cd_t *c) { return c->sc != NULL; }
+static int cd_sub_codec(cd_t *c) { return c->subStream >= 0 ? (int)c->fc->streams[c->subStream]->codecpar->codec_id : -1; }
+static int cd_sub_err(cd_t *c) { return c->subStream >= 0 ? c->subErr : -1; }
+static int cd_sub_count(cd_t *c) { return c->subCount; }
+static int64_t cd_sub_start(cd_t *c, int i) { return c->subStart[i]; }
+static int64_t cd_sub_end(cd_t *c, int i) { return c->subEnd[i]; }
+static int cd_sub_is_ass(cd_t *c, int i) { return c->subASS[i]; }
+static const char *cd_sub_text(cd_t *c, int i) { return c->subText[i]; }
+static const char *cd_sub_header(cd_t *c, int *len) {
+    if (!c->sc || !c->sc->subtitle_header) { *len = 0; return NULL; }
+    *len = c->sc->subtitle_header_size;
+    return (const char *)c->sc->subtitle_header;
+}
+static void cd_sub_take(cd_t *c, int n) {
+    if (n <= 0) return;
+    if (n > c->subCount) n = c->subCount;
+    for (int i = 0; i < n; i++) { free(c->subText[i]); c->subText[i] = NULL; }
+    memmove(c->subText, c->subText + n, sizeof(char *) * (c->subCount - n));
+    memmove(c->subStart, c->subStart + n, sizeof(int64_t) * (c->subCount - n));
+    memmove(c->subEnd, c->subEnd + n, sizeof(int64_t) * (c->subCount - n));
+    memmove(c->subASS, c->subASS + n, sizeof(int) * (c->subCount - n));
+    c->subCount -= n;
 }
 */
 import "C"
@@ -211,6 +322,54 @@ func (d *Decoder) Seek(t time.Duration) error {
 		return fmt.Errorf("decoder: seek failed (%d)", int(rc))
 	}
 	return nil
+}
+
+// HasSubtitles reports whether the file carries a subtitle track.
+func (d *Decoder) HasSubtitles() bool { return C.cd_has_subs(d.c) != 0 }
+
+// SubtitleCodecID returns the codec id of the subtitle track, or -1.
+func (d *Decoder) SubtitleCodecID() int { return int(C.cd_sub_codec(d.c)) }
+
+// SubtitleError returns why the subtitle track could not be opened.
+func (d *Decoder) SubtitleError() int { return int(C.cd_sub_err(d.c)) }
+
+// SubtitleEvent is one subtitle of a track, and when it shows.
+type SubtitleEvent struct {
+	Start, End time.Duration
+	Text       string
+	ASS        bool
+}
+
+// Subtitles returns the subtitle events decoded since the last call: each
+// call to Next or SeekTo decodes the packets of the subtitle track it meets
+// on the way.
+func (d *Decoder) Subtitles() []SubtitleEvent {
+	n := int(C.cd_sub_count(d.c))
+	if n == 0 {
+		return nil
+	}
+	out := make([]SubtitleEvent, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, SubtitleEvent{
+			Start: time.Duration(C.cd_sub_start(d.c, C.int(i))) * time.Millisecond,
+			End:   time.Duration(C.cd_sub_end(d.c, C.int(i))) * time.Millisecond,
+			Text:  C.GoString(C.cd_sub_text(d.c, C.int(i))),
+			ASS:   C.cd_sub_is_ass(d.c, C.int(i)) != 0,
+		})
+	}
+	C.cd_sub_take(d.c, C.int(n))
+	return out
+}
+
+// SubtitleHeader returns the ASS header of the subtitle track, empty when
+// the track carries plain text.
+func (d *Decoder) SubtitleHeader() string {
+	var n C.int
+	p := C.cd_sub_header(d.c, &n)
+	if p == nil || n <= 0 {
+		return ""
+	}
+	return C.GoStringN(p, n)
 }
 
 // Close releases the decoder.

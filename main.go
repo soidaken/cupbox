@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,6 +90,8 @@ func main() {
 		p.bm.Update(p.img)
 
 		p.subs = loadSubtitles(path)
+		p.subStyle = parseASSHeader(dec.SubtitleHeader())
+		p.embedded = append(p.embedded, dec.Subtitles()...)
 
 		// Audio is the clock: the picture follows what is heard.
 		if ad, err := decoder.OpenAudio(path); err == nil {
@@ -281,7 +284,10 @@ type player struct {
 	ad   *decoder.Audio
 	ap   *audio.Player
 	win  *mygo.Window
-	subs *subtitles
+	subs *subtitles // a sidecar .srt next to the video
+
+	embedded []decoder.SubtitleEvent // the file's own subtitle track
+	subStyle assStyle
 
 	pending *decoder.Frame
 	eof     bool
@@ -542,6 +548,8 @@ func (p *player) load(path string) {
 	}
 	p.dec, p.info, p.ad, p.ap = dec, info, nil, nil
 	p.subs = loadSubtitles(path)
+	p.subStyle = parseASSHeader(dec.SubtitleHeader())
+	p.embedded = append(p.embedded[:0], dec.Subtitles()...)
 	if aerr == nil {
 		p.ad = ad
 		p.ap = audio.NewPlayer(ad)
@@ -611,6 +619,7 @@ func (p *player) seekTo(t time.Duration) {
 	}
 	start := time.Now()
 	f, err := p.dec.SeekTo(t)
+	p.embedded = append(p.embedded[:0], p.dec.Subtitles()...)
 	p.eof = false
 	p.pending = nil
 	p.base = t
@@ -634,6 +643,7 @@ func (p *player) pump(pos time.Duration, max int) {
 	for i := 0; i < max && !p.eof; i++ {
 		if p.pending == nil {
 			f, err := p.dec.Next()
+			p.embedded = append(p.embedded, p.dec.Subtitles()...)
 			if err != nil {
 				p.eof = true
 				p.eofAt = time.Now().Add(1200 * time.Millisecond)
@@ -802,6 +812,16 @@ func (p *player) update() {
 		return
 	}
 	p.pump(p.position(), 4)
+
+	// Forget the subtitles that are behind us.
+	pos := p.position()
+	keep := p.embedded[:0]
+	for _, ev := range p.embedded {
+		if ev.End > pos-2*time.Second {
+			keep = append(keep, ev)
+		}
+	}
+	p.embedded = keep
 }
 
 func (p *player) draw(pt *ui.Painter, r ui.Rect) {
@@ -826,8 +846,15 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 
 	pt.Image(p.bm, r, ui.Contain)
 
-	if line := p.subs.at(p.position()); line != "" {
+	pos := p.position()
+	if line := p.subs.at(pos); line != "" {
 		p.drawSubtitle(pt, r, line)
+	} else {
+		for _, ev := range p.embedded {
+			if ev.Start <= pos+30*time.Millisecond && pos < ev.End {
+				p.drawEmbedded(pt, r, ev)
+			}
+		}
 	}
 
 	if p.bar <= 0 {
@@ -1035,6 +1062,57 @@ func (p *player) drawSubtitle(pt *ui.Painter, r ui.Rect, text string) {
 		x := r.X + (r.W-widths[i])/2
 		pt.Text(x+1, y+1, line, size, shadow)
 		pt.Text(x, y, line, size, col)
+		y += heights[i] + gap
+	}
+}
+
+// drawEmbedded paints one subtitle of the file's own track, in the place
+// and colour its style asks for.
+func (p *player) drawEmbedded(pt *ui.Painter, r ui.Rect, ev decoder.SubtitleEvent) {
+	lines, st := parseASSLines(assDialogueText(ev.Text), p.subStyle)
+	scale := float64(1)
+	if st.playResY > 0 {
+		scale = float64(r.H) / st.playResY
+	}
+	size := float32(st.fontSize * scale)
+	col := color.RGBA(st.color)
+	tint := ui.RGBA(col.R, col.G, col.B, float32(col.A)/255)
+	shadow := ui.RGBA(0, 0, 0, 0.45)
+
+	row := (st.align - 1) / 3 // 0 bottom, 1 middle, 2 top
+	colIdx := (st.align - 1) % 3
+	const side = 40
+	var total, gap float32 = 0, 2
+	widths := make([]float32, len(lines))
+	heights := make([]float32, len(lines))
+	for i, line := range lines {
+		w, h := pt.MeasureText(0, ui.Span{Text: line, Size: size})
+		widths[i], heights[i] = w, h
+		total += h
+	}
+	total += gap * float32(len(lines)-1)
+
+	var y float32
+	switch row {
+	case 0:
+		y = r.Y + r.H - (barHeight + 44) - total
+	case 1:
+		y = r.Y + (r.H-total)/2
+	default:
+		y = r.Y + side
+	}
+	for i, line := range lines {
+		var x float32
+		switch colIdx {
+		case 0:
+			x = r.X + side
+		case 1:
+			x = r.X + (r.W-widths[i])/2
+		default:
+			x = r.X + r.W - side - widths[i]
+		}
+		pt.Text(x+1, y+1, line, size, shadow)
+		pt.Text(x, y, line, size, tint)
 		y += heights[i] + gap
 	}
 }

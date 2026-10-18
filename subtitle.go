@@ -1,6 +1,7 @@
 package main
 
 import (
+	"image/color"
 	"os"
 	"path/filepath"
 	"sort"
@@ -166,4 +167,132 @@ func (s *subtitles) at(t time.Duration) string {
 		return s.cues[i].text
 	}
 	return ""
+}
+
+// assStyle is what an ASS script says about the text it draws.
+type assStyle struct {
+	playResY float64
+	fontSize float64
+	color    color.RGBA
+	align    int // 1-9, as the numpad: 2 is bottom center
+	marginV  float64
+}
+
+// parseASSHeader reads the script's resolution and its Default style.
+func parseASSHeader(header string) assStyle {
+	st := assStyle{playResY: 0, fontSize: 48, color: color.RGBA{255, 255, 255, 255}, align: 2, marginV: 30}
+	for _, line := range strings.Split(header, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "PlayResY:"):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(line[len("PlayResY:"):]), 64); err == nil {
+				st.playResY = v
+			}
+		case strings.HasPrefix(line, "Style:"):
+			fields := strings.Split(line[len("Style:"):], ",")
+			if len(fields) < 20 {
+				continue
+			}
+			if v, err := strconv.ParseFloat(strings.TrimSpace(fields[2]), 64); err == nil && v > 0 {
+				st.fontSize = v
+			}
+			st.color = assColor(fields[3])
+			if v, err := strconv.Atoi(strings.TrimSpace(fields[18])); err == nil && v >= 1 && v <= 9 {
+				st.align = v
+			}
+			if v, err := strconv.ParseFloat(strings.TrimSpace(fields[19]), 64); err == nil && v >= 0 {
+				st.marginV = v
+			}
+		}
+	}
+	return st
+}
+
+// assColor reads &HAABBGGRR& or &HBBGGRR&.
+func assColor(s string) color.RGBA {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(strings.TrimPrefix(s, "&H"), "&h")
+	s = strings.TrimSuffix(s, "&")
+	if len(s) > 8 {
+		s = s[len(s)-8:]
+	}
+	v, err := strconv.ParseUint(s, 16, 32)
+	if err != nil {
+		return color.RGBA{255, 255, 255, 255}
+	}
+	// &HAABBGGRR: red in the low byte, blue in the third.
+	r := byte(v & 0xFF)
+	g := byte(v >> 8 & 0xFF)
+	b := byte(v >> 16 & 0xFF)
+	a := byte(255)
+	if len(s) == 8 {
+		a = byte(255 - (v >> 24 & 0xFF))
+	}
+	return color.RGBA{r, g, b, a}
+}
+
+// assDialogueText drops the fields a subtitle decoder puts before the text:
+// ReadOrder, Layer, Style, Name, MarginL, MarginR, MarginV, Effect.
+func assDialogueText(s string) string {
+	idx := 0
+	for i := 0; i < 8; i++ {
+		j := strings.IndexByte(s[idx:], ',')
+		if j < 0 {
+			return s
+		}
+		idx += j + 1
+	}
+	return s[idx:]
+}
+
+// parseASSLines splits a dialogue into its lines, taking the tags that
+// change the whole line (alignment, size, colour) and dropping the rest.
+func parseASSLines(s string, def assStyle) ([]string, assStyle) {
+	st := def
+	var (
+		lines []string
+		b     strings.Builder
+	)
+	for i := 0; i < len(s); {
+		switch {
+		case s[i] == '{':
+			j := strings.IndexByte(s[i:], '}')
+			if j < 0 {
+				i = len(s)
+				continue
+			}
+			assTags(s[i+1:i+j], &st)
+			i += j + 1
+		case s[i] == '\\' && i+1 < len(s) && (s[i+1] == 'N' || s[i+1] == 'n'):
+			lines = append(lines, b.String())
+			b.Reset()
+			i += 2
+		default:
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	lines = append(lines, b.String())
+	return lines, st
+}
+
+// assTags applies the tags of one override block that change the line.
+func assTags(tags string, st *assStyle) {
+	for _, tag := range strings.Split(tags, "\\") {
+		tag = strings.TrimSpace(tag)
+		switch {
+		case strings.HasPrefix(tag, "an"):
+			if v, err := strconv.Atoi(tag[2:]); err == nil && v >= 1 && v <= 9 {
+				st.align = v
+			}
+		case strings.HasPrefix(tag, "fs"):
+			if v, err := strconv.ParseFloat(tag[2:], 64); err == nil && v > 0 {
+				st.fontSize = v
+			}
+		case strings.HasPrefix(tag, "1c"), strings.HasPrefix(tag, "c"):
+			if i := strings.Index(tag, "&H"); i >= 0 {
+				st.color = assColor(tag[i:])
+			}
+		}
+	}
 }
