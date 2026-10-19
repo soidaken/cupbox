@@ -13,6 +13,8 @@ MS-MPEG4, FLV, MJPEG and H.263; and these audio decoders: AAC, MP3, Opus,
 Vorbis, FLAC, ALAC, AC-3, E-AC-3, DTS, TrueHD, WMA1/2, MP2, PCM, APE,
 WavPack, AMR-NB/WB and Speex; and these subtitle decoders: ASS, SubRip,
 mov_text, WebVTT, PGS, DVD and DVB subtitles. It links zlib for the
-compressed subtitle tracks of Matroska files.
+compressed subtitle tracks of Matroska files, and the MinGW pthread
+runtime; zlib1.dll and libwinpthread-1.dll ship next to cupbox.exe for
+that reason.
 
 FFmpeg source: https://github.com/FFmpeg/FFmpeg (release/8.0)
