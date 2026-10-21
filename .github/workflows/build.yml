@@ -52,11 +52,14 @@ jobs:
           if-no-files-found: error
 
       # A v* tag publishes what it built, so a release always matches a commit.
+      # gh expands the paths itself: the pattern engine inside the release
+      # actions does not match a wildcard here.
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/Cupbox-Setup-*.exe
-            dist/Cupbox-0.1.0-portable.zip
-          generate_release_notes: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = Get-ChildItem dist\Cupbox-Setup-*.exe, dist\Cupbox-*-portable.zip |
+            ForEach-Object FullName
+          gh release create $env:GITHUB_REF_NAME --generate-notes --verify-tag @files
