@@ -55,4 +55,6 @@ docs/DESIGN.md       设计说明与实测记录
 
 ## 许可
 
-Cupbox 自身尚未附许可证文件（如需开源授权请先添加）。FFmpeg 以 LGPL v2.1+ 动态链接使用，许可证与声明随安装包发布：`packaging/LICENSE-FFmpeg-LGPLv2.1.txt`、`packaging/NOTICE.txt`。
+Cupbox 自身以 MIT 许可证发布，见 [LICENSE](LICENSE)。
+
+FFmpeg 以 LGPL v2.1+ 动态链接使用，许可证与声明随安装包发布：`packaging/LICENSE-FFmpeg-LGPLv2.1.txt`、`packaging/NOTICE.txt`；MSYS2 的两个运行时 DLL 分别来自 zlib 许可证与 mingw-w64。
