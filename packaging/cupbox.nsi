@@ -128,6 +128,11 @@ Section "Cupbox" SecMain
   CreateDirectory "$SMPROGRAMS\${APPNAME}"
   CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" "$INSTDIR\cupbox.exe"
   CreateShortcut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\cupbox.exe"
+
+  ; Run the player once, so that Windows and any antivirus check of this
+  ; new executable happen while the installer still shows progress, not the
+  ; first time a video is double-clicked. It exits before making a window.
+  ExecWait '"$INSTDIR\cupbox.exe" --warmup'
 SectionEnd
 
 Section "Uninstall"

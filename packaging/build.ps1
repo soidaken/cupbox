@@ -1,9 +1,15 @@
 # Builds cupbox.exe, the Windows installer and the portable zip.
-# Needs: Go 1.27+, the FFmpeg build in .tools/ffmpeg-min, MSYS2 at C:\msys64
-# (for zlib1.dll and libwinpthread-1.dll), NSIS at its default path.
+# Needs: Go 1.27+, NSIS at its default path, and on a fresh checkout nothing
+# else: the FFmpeg build and the MSYS2 DLLs are in third_party.
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
+
+# FFmpeg, where cgo expects it. A local .tools\ffmpeg-min built by hand wins.
+if (-not (Test-Path ".tools\ffmpeg-min\include")) {
+    New-Item -ItemType Directory ".tools" -Force | Out-Null
+    Copy-Item "third_party\ffmpeg" ".tools\ffmpeg-min" -Recurse -Force
+}
 
 # Runtime DLLs: FFmpeg, plus the two it needs that Windows does not have.
 $ffmpeg = ".tools\ffmpeg-min\bin"
@@ -11,20 +17,22 @@ if (Test-Path $ffmpeg) {
     Copy-Item "$ffmpeg\*.dll" . -Force
 }
 $deps = @{
-    "zlib1.dll"           = "C:\msys64\mingw64\bin\zlib1.dll"
-    "libwinpthread-1.dll" = "C:\msys64\mingw64\bin\libwinpthread-1.dll"
+    "zlib1.dll"           = @("C:\msys64\mingw64\bin\zlib1.dll", "third_party\msys2\zlib1.dll")
+    "libwinpthread-1.dll" = @("C:\msys64\mingw64\bin\libwinpthread-1.dll", "third_party\msys2\libwinpthread-1.dll")
 }
 foreach ($name in $deps.Keys) {
-    if (-not (Test-Path $name)) {
-        if (Test-Path $deps[$name]) {
-            Copy-Item $deps[$name] $name
-        } else {
-            throw "missing runtime DLL: $($deps[$name])"
-        }
+    if (Test-Path $name) { continue }
+    $from = $deps[$name] | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($from) {
+        Copy-Item $from $name
+    } else {
+        throw "missing runtime DLL: $name"
     }
 }
 
-go build -ldflags="-H windowsgui" -o cupbox.exe .
+# -s -w keeps the symbol table and debug info out: a smaller file for
+# Windows and any antivirus to read, and for a slower disk.
+go build -ldflags="-s -w -H windowsgui" -o cupbox.exe .
 
 $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
 if (Test-Path $makensis) {
