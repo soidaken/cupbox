@@ -16,3 +16,7 @@ Thumbs.db
 /*.dll
 /spike/**/*.exe
 /spike/**/*.dll
+
+# local experiments: downloaded media, probe runs, screenshots
+/spike/
+/cupbox_dbg.exe

@@ -1,8 +1,0 @@
-place 2225x1252 at 167,70
-first frame after 96ms
-bar=0.00 target=0 idle=641ms over=false overUI=false y=0 h=1252
-bar=0.00 target=0 idle=1.143s over=false overUI=false y=0 h=1252
-bar=0.00 target=0 idle=1.642s over=false overUI=false y=0 h=1440
-bar=0.25 target=1 idle=1ms over=true overUI=false y=700 h=1440
-bar=0.00 target=0 idle=500ms over=true overUI=false y=700 h=1440
-bar=0.00 target=0 idle=1s over=true overUI=false y=700 h=1440
