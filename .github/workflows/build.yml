@@ -60,6 +60,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $files = Get-ChildItem dist\Cupbox-Setup-*.exe, dist\Cupbox-*-portable.zip |
-            ForEach-Object FullName
-          gh release create $env:GITHUB_REF_NAME --generate-notes --verify-tag @files
+          $files = Get-ChildItem "dist" -File | Where-Object { ($_.Name -like "Cupbox-Setup-*.exe") -or ($_.Name -like "Cupbox-*-portable.zip") }
+          $files | ForEach-Object { Write-Host "attaching $($_.Name) ($($_.Length) bytes)" }
+          gh release create $env:GITHUB_REF_NAME --generate-notes --verify-tag $files.FullName
