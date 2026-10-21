@@ -36,7 +36,9 @@ go build -ldflags="-s -w -H windowsgui" -o cupbox.exe .
 
 $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
 if (Test-Path $makensis) {
+    New-Item -ItemType Directory "dist" -Force | Out-Null
     & $makensis "packaging\cupbox.nsi"
+    if ($LASTEXITCODE -ne 0) { throw "makensis failed with $LASTEXITCODE" }
 } else {
     Write-Warning "NSIS not found: skipped the installer"
 }
