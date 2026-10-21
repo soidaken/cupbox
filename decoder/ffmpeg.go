@@ -21,6 +21,8 @@ typedef struct {
     int width, height;
     int64_t durationMs;
     double fps;
+    int64_t videoBitRate, audioBitRate;
+    int hasAudio;
     int draining; // codec flushed, only buffered frames left
 
     // Subtitles of the first subtitle track, as text ready to show.
@@ -188,8 +190,17 @@ static int cd_open(const char *path, cd_t **out, char *err, int errlen) {
     if (!c) return -1;
     int e = avformat_open_input(&c->fc, path, NULL, NULL);
     if (e < 0) { av_strerror(e, err, errlen); cd_close(c); return -1; }
-    e = avformat_find_stream_info(c->fc, NULL);
-    if (e < 0) { av_strerror(e, err, errlen); cd_close(c); return -1; }
+    // MP4/MOV headers already describe the streams. Probing them again
+    // decodes packets only to discard the results before our first frame.
+    int headerVideo = av_find_best_stream(c->fc, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+    int complete = headerVideo >= 0 && strstr(c->fc->iformat->name, "mov") &&
+        c->fc->streams[headerVideo]->codecpar->width > 0 &&
+        c->fc->streams[headerVideo]->codecpar->height > 0 &&
+        c->fc->streams[headerVideo]->codecpar->codec_id != AV_CODEC_ID_NONE;
+    if (!complete) {
+        e = avformat_find_stream_info(c->fc, NULL);
+        if (e < 0) { av_strerror(e, err, errlen); cd_close(c); return -1; }
+    }
     c->stream = av_find_best_stream(c->fc, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
     if (c->stream < 0) { snprintf(err, errlen, "no video stream"); cd_close(c); return -1; }
     AVStream *st = c->fc->streams[c->stream];
@@ -208,7 +219,12 @@ static int cd_open(const char *path, cd_t **out, char *err, int errlen) {
     if (c->fc->duration > 0) c->durationMs = c->fc->duration / (AV_TIME_BASE / 1000);
     if (st->duration > 0) c->durationMs = av_rescale_q(st->duration, st->time_base, (AVRational){1, 1000});
     AVRational fr = st->avg_frame_rate;
+    if (fr.num <= 0 || fr.den <= 0) fr = av_guess_frame_rate(c->fc, st, NULL);
     if (fr.num > 0 && fr.den > 0) c->fps = av_q2d(fr);
+    c->videoBitRate = st->codecpar->bit_rate;
+    int audio = av_find_best_stream(c->fc, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+    c->hasAudio = audio >= 0;
+    if (audio >= 0) c->audioBitRate = c->fc->streams[audio]->codecpar->bit_rate;
     c->subStream = av_find_best_stream(c->fc, AVMEDIA_TYPE_SUBTITLE, -1, -1, NULL, 0);
     if (c->subStream >= 0) {
         AVStream *ss = c->fc->streams[c->subStream];
@@ -273,7 +289,7 @@ static int cd_next(cd_t *c, uint8_t *dst, int64_t *ptsMs, int64_t minMs, char *e
             if (ts != AV_NOPTS_VALUE) ms = av_rescale_q(ts, st->time_base, (AVRational){1, 1000});
             if (ms < minMs) { av_frame_unref(c->frm); continue; }
             *ptsMs = ms;
-            cd_to_rgba(c, c->frm, dst);
+            if (dst) cd_to_rgba(c, c->frm, dst);
             av_frame_unref(c->frm);
             return 1;
         }
@@ -393,10 +409,13 @@ func Open(path string) (*Decoder, Info, error) {
 	}
 	d.c = c
 	d.info = Info{
-		Width:    int(c.width),
-		Height:   int(c.height),
-		Duration: time.Duration(c.durationMs) * time.Millisecond,
-		FPS:      float64(c.fps),
+		Width:        int(c.width),
+		Height:       int(c.height),
+		Duration:     time.Duration(c.durationMs) * time.Millisecond,
+		FPS:          float64(c.fps),
+		VideoBitRate: int64(c.videoBitRate),
+		AudioBitRate: int64(c.audioBitRate),
+		HasAudio:     c.hasAudio != 0,
 	}
 	d.buf = make([]byte, d.info.Width*d.info.Height*4)
 	d.frame.RGBA = d.buf
@@ -423,6 +442,28 @@ func (d *Decoder) SeekTo(t time.Duration) (*Frame, error) {
 		return nil, fmt.Errorf("decoder: seek failed (%d)", int(rc))
 	}
 	return d.decode(C.int64_t(t.Milliseconds()))
+}
+
+// FrameBefore returns the actual preceding presentation frame, including
+// variable-rate video. Scan timestamps without RGBA conversion, then seek
+// to the selected frame. At the start, stay on the first frame.
+func (d *Decoder) FrameBefore(t time.Duration) (*Frame, error) {
+	if err := d.Seek(max(0, t-time.Millisecond)); err != nil {
+		return nil, err
+	}
+	previous := time.Duration(0)
+	for {
+		var pts C.int64_t
+		rc := C.cd_next(d.c, nil, &pts, -1, &d.errbuf[0], C.int(len(d.errbuf)))
+		if rc < 0 {
+			return nil, fmt.Errorf("decoder: %s", C.GoString(&d.errbuf[0]))
+		}
+		if rc == 0 || time.Duration(pts)*time.Millisecond >= t {
+			break
+		}
+		previous = time.Duration(pts) * time.Millisecond
+	}
+	return d.SeekTo(previous)
 }
 
 func (d *Decoder) decode(minMs C.int64_t) (*Frame, error) {

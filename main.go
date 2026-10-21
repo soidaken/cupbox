@@ -19,18 +19,27 @@ import (
 
 	"cupbox/decoder"
 
+	"github.com/disintegration/imaging"
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/audio"
 	"github.com/egoist/mygo/ui"
 )
 
 const (
-	barHeight = 32
-	emptyW    = 960
-	emptyH    = 640
-	dragSlop  = 4                      // pixels a press may wander before it moves the window
-	moveSlop  = 5                      // pixels the pointer must travel to count as activity
-	hideAfter = 100 * time.Millisecond // how long the overlay stays after the pointer rests
+	barHeight     = 32
+	overlayHeight = 112
+	emptyW        = 960
+	emptyH        = 640
+	dragSlop      = 4               // pixels a press may wander before it moves the window
+	moveSlop      = 5               // pixels the pointer must travel to count as activity
+	hideAfter     = 2 * time.Second // how long the overlay stays after the pointer rests
+	endingBlur    = 30              // ending background strength on our 0–100 scale
+
+	// audioStartGrace is how long the picture waits for the sound before
+	// running on its own clock. Opening a cold output device — WASAPI
+	// waking a Bluetooth headset, the audio service starting — can take
+	// seconds, and a still picture is worse than a silent start.
+	audioStartGrace = 600 * time.Millisecond
 )
 
 // iconPNG is the window icon: the same picture the executable carries, so
@@ -41,24 +50,19 @@ var iconPNG []byte
 
 var t0 = time.Now()
 
-var logf *os.File
-
-func logf_(format string, a ...any) {
-	if logf == nil {
-		name := os.Getenv("CUPBOX_LOG")
-		if name == "" {
-			return
-		}
-		f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if err != nil {
-			return
-		}
-		logf = f
-	}
-	fmt.Fprintf(logf, format+"\n", a...)
-}
-
 func main() {
+	// The installer runs the player with this once, so that Windows and any
+	// antivirus load and check the executable while the installer is still
+	// showing progress. Loading it already does that: the FFmpeg DLLs are
+	// imports, loaded before main. Nothing else happens.
+	for _, arg := range os.Args[1:] {
+		if arg == "--warmup" {
+			return
+		}
+	}
+	entered := time.Now()
+	logf_("startup: main entered at %s; main-package globals=%v", entered.Format(time.RFC3339Nano), entered.Sub(t0))
+	logStartupProcess(entered)
 	var (
 		p    *player
 		winW = emptyW
@@ -69,7 +73,9 @@ func main() {
 		p.in = newInput()
 	} else {
 		path := os.Args[1]
+		logf_("startup: opening video %q", path)
 		dec, info, err := decoder.Open(path)
+		logf_("startup: video open at %v", time.Since(t0))
 		if errors.Is(err, decoder.ErrNoVideo) || (err == nil && (info.Width == 0 || info.Height == 0)) {
 			// An audio file, or anything else without a picture: Cupbox
 			// plays pictures only, and says nothing.
@@ -78,49 +84,65 @@ func main() {
 		if err != nil {
 			fail(err.Error())
 		}
-		p = &player{dec: dec, info: info, volume: 1, in: newInput()}
+		p = &player{dec: dec, info: info, sourcePath: path, volume: 1, in: newInput()}
 		p.img = &image.RGBA{
 			Pix:    dec.Pixels(),
 			Stride: info.Width * 4,
 			Rect:   image.Rect(0, 0, info.Width, info.Height),
 		}
 		p.bm = ui.NewBitmap(p.img)
+		logf_("startup: decoding first picture")
 
 		// Decode the first frame before the window exists: it shows the
 		// picture the moment it appears, and the cost is paid while the
 		// window is made.
-		if _, err := dec.Next(); err != nil {
+		if f, err := dec.Next(); err != nil {
 			fail("cannot decode: " + err.Error())
+		} else {
+			p.shownPTS = f.PTS
 		}
 		p.bm.Update(p.img)
+		logf_("startup: first picture decoded at %v", time.Since(t0))
 
+		logf_("startup: loading subtitles")
 		p.subs = loadSubtitles(path)
 		p.subStyle = parseASSHeader(dec.SubtitleHeader())
 		p.subW, p.subH = dec.SubtitleSize()
 		p.embedded = append(p.embedded, dec.Subtitles()...)
+		logf_("startup: subtitles ready at %v", time.Since(t0))
 
 		// Audio is the clock: the picture follows what is heard.
+		logf_("startup: opening audio stream")
 		if ad, err := decoder.OpenAudio(path); err == nil {
+			logf_("startup: audio open at %v", time.Since(t0))
 			p.ad = ad
+			logf_("startup: creating audio player")
 			p.ap = audio.NewPlayer(ad)
+			logf_("startup: starting audio player")
 			p.ap.Play()
+			logf_("startup: audio Play returned at %v (device opens asynchronously)", time.Since(t0))
 		} else {
 			logf_("no audio: %v", err)
 		}
 		winW, winH = info.Width, info.Height
 	}
 
+	logf_("startup: decoding icon")
 	if bmp, err := ui.DecodeBitmap(iconPNG); err == nil {
 		p.iconBmp = bmp
 	}
+	logf_("startup: icon ready at %v", time.Since(t0))
 
 	mygo.App.WhenReady(func() {
+		logf_("startup: app ready at %v", time.Since(t0))
+		logf_("startup: calculating window position")
 		w, h := winW, winH
 		if p.dec != nil {
 			w, h = fitToScreen(p.info.Width, p.info.Height)
 		}
 		x, y := cascadePosition(w, h)
 		logf_("place %dx%d at %d,%d", w, h, x, y)
+		logf_("startup: creating window %dx%d", w, h)
 		win := mygo.NewWindow(mygo.WindowOptions{
 			Title:          "Cupbox",
 			Width:          w,
@@ -132,15 +154,20 @@ func main() {
 			DisableResize:  true,
 			Content:        ui.View(p.view),
 		})
+		setDwm(win.NativeHandle(), dwmcpRound, dwmColorNone)
+		logf_("startup: window created at %v", time.Since(t0))
+		logf_("startup: setting window icon")
 		if err := win.SetIcon(iconPNG); err != nil {
 			logf_("window icon: %v", err)
 		}
+		logf_("startup: window icon ready at %v", time.Since(t0))
 		win.OnFileDrop(func(e *mygo.FileDropEvent) {
 			if len(e.Paths) > 0 {
 				p.requestOpen(e.Paths[0])
 			}
 		})
 	})
+	logf_("startup: entering application loop")
 	if err := mygo.App.Run(); err != nil {
 		fail(err.Error())
 	}
@@ -187,6 +214,11 @@ var (
 	user32                   = syscall.NewLazyDLL("user32.dll")
 	procSetWindowPos         = user32.NewProc("SetWindowPos")
 	procGetCursorPos         = user32.NewProc("GetCursorPos")
+	procScreenToClient       = user32.NewProc("ScreenToClient")
+	procClientToScreen       = user32.NewProc("ClientToScreen")
+	procGetClientRect        = user32.NewProc("GetClientRect")
+	procWindowFromPoint      = user32.NewProc("WindowFromPoint")
+	procGetAncestor          = user32.NewProc("GetAncestor")
 	procGetWindowRect        = user32.NewProc("GetWindowRect")
 	procMonitorFromWin       = user32.NewProc("MonitorFromWindow")
 	procGetMonitorInfoW      = user32.NewProc("GetMonitorInfoW")
@@ -227,9 +259,8 @@ const (
 	dwmwaCornerPreference = 33
 	dwmwaBorderColor      = 34
 	dwmcpDoNotRound       = 1
-	dwmcpDefault          = 0
+	dwmcpRound            = 2
 	dwmColorNone          = 0xFFFFFFFE
-	dwmColorDefault       = 0xFFFFFFFF
 )
 
 type point struct{ X, Y int32 }
@@ -285,16 +316,18 @@ func monitorInfoOf(hwnd uintptr) (monitorInfo, bool) {
 }
 
 type player struct {
-	empty bool
+	empty      bool
+	sourcePath string // retained after playback ends so Space can replay it
 
-	dec  *decoder.Decoder
-	info decoder.Info
-	img  *image.RGBA
-	bm   *ui.Bitmap
-	ad   *decoder.Audio
-	ap   *audio.Player
-	win  *mygo.Window
-	subs *subtitles // a sidecar .srt next to the video
+	dec      *decoder.Decoder
+	info     decoder.Info
+	img      *image.RGBA
+	bm       *ui.Bitmap
+	endingBM *ui.Bitmap // cached blurred last frame, only used on the ending screen
+	ad       *decoder.Audio
+	ap       *audio.Player
+	win      *mygo.Window
+	subs     *subtitles // a sidecar .srt next to the video
 
 	embedded   []decoder.SubtitleEvent // the file's own subtitle track
 	subStyle   assStyle
@@ -302,14 +335,19 @@ type player struct {
 	subBmp     *ui.Bitmap // the picture subtitle being shown
 	subBmpAt   string
 
-	pending *decoder.Frame
-	eof     bool
-	paused  bool
-	base    time.Duration
-	started time.Time
-	ready   bool
-	shown   int
-	dropped int
+	pending         *decoder.Frame
+	shownPTS        time.Duration // timestamp of the frame actually on screen
+	eof             bool
+	paused          bool
+	base            time.Duration
+	started         time.Time
+	ready           bool
+	shown           int
+	dropped         int
+	clockLogged     bool
+	motionLogged    bool
+	clockWaitLogged bool
+	lateAudio       bool // the picture runs on its own clock: the sound was slow to start
 
 	volume float64
 
@@ -324,6 +362,7 @@ type player struct {
 	anchorX       float32
 	anchorY       float32
 	volAt         time.Time
+	overlayAt     time.Time
 	iconBmp       *ui.Bitmap
 	lastTap       time.Time
 	keyHeld       bool
@@ -371,9 +410,62 @@ func (p *player) position() time.Duration {
 		return p.base
 	}
 	if p.ap != nil {
-		return p.ap.Position()
+		pos := p.ap.Position()
+		switch chooseClock(pos, p.lateAudio, time.Since(p.started)) {
+		case clockSound:
+			return pos
+		case clockWait:
+			return 0
+		}
+		if !p.lateAudio {
+			p.lateAudio = true
+			logf_("startup: no sound after %v (output error=%v); the picture runs on its own clock",
+				time.Since(p.started).Round(time.Millisecond), audio.Err())
+		}
 	}
 	return p.base + time.Since(p.started)
+}
+
+// clockChoice is what runs the picture.
+type clockChoice int
+
+const (
+	clockSound   clockChoice = iota // the sound, once it plays
+	clockWait                       // waiting for a sound that has not started
+	clockPicture                    // the picture's own clock: the sound is late
+)
+
+// chooseClock decides between them: the sound runs the picture once it
+// plays, and the picture runs itself when the wait for a slow device is over.
+func chooseClock(audioPos time.Duration, late bool, since time.Duration) clockChoice {
+	if late {
+		return clockPicture
+	}
+	if audioPos > 0 {
+		return clockSound
+	}
+	if since >= audioStartGrace {
+		return clockPicture
+	}
+	return clockWait
+}
+
+// joinAudio hands the clock back to the sound once a device that was slow
+// to open finally plays. The sound skips forward to the picture, so the
+// picture neither jumps back to the start nor drifts ahead of what is heard.
+func (p *player) joinAudio() {
+	if !p.lateAudio || p.ap == nil || p.paused || p.eof {
+		return
+	}
+	pos := p.ap.Position()
+	if pos == 0 {
+		return
+	}
+	at := p.base + time.Since(p.started)
+	p.ap.Seek(at)
+	p.lateAudio = false
+	logf_("startup: the sound joined at %v; skipped forward to the picture at %v after %v",
+		pos.Round(time.Millisecond), at.Round(time.Millisecond), time.Since(t0).Round(time.Millisecond))
 }
 
 // cascadePosition returns where a window of w×h goes: 30px right and down
@@ -484,12 +576,8 @@ func (p *player) raise() {
 	}
 }
 
-func (p *player) startWindowDrag() {
+func (p *player) startWindowDrag(c point) {
 	if p.win == nil || p.full {
-		return
-	}
-	c, ok := cursorPos()
-	if !ok {
 		return
 	}
 	r, ok := windowRect(p.win.NativeHandle())
@@ -499,16 +587,12 @@ func (p *player) startWindowDrag() {
 	p.dragWin, p.dragMoved, p.dragFrom, p.winFrom = true, false, c, r
 }
 
-func (p *player) dragIfHeld() {
+func (p *player) dragTo(c point) {
 	if !p.dragWin {
 		return
 	}
 	if !p.in.PointerDown(0) {
 		p.dragWin = false
-		return
-	}
-	c, ok := cursorPos()
-	if !ok {
 		return
 	}
 	dx, dy := c.X-p.dragFrom.X, c.Y-p.dragFrom.Y
@@ -520,6 +604,65 @@ func (p *player) dragIfHeld() {
 			p.winFrom.Left+dx, p.winFrom.Top+dy, 0, 0,
 			swpNoSize|swpNoZOrder|swpNoActivate)
 	}
+}
+
+func (p *player) pointerScreen(ev ui.InputEvent) (point, bool) {
+	if p.win == nil || p.in.w <= 0 || p.in.h <= 0 {
+		return point{}, false
+	}
+	hwnd := p.win.NativeHandle()
+	var client rect
+	if ok, _, _ := procGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&client))); ok == 0 {
+		return point{}, false
+	}
+	c := point{int32(ev.X * float32(client.Right) / p.in.w), int32(ev.Y * float32(client.Bottom) / p.in.h)}
+	ok, _, _ := procClientToScreen.Call(hwnd, uintptr(unsafe.Pointer(&c)))
+	return c, ok != 0
+}
+
+// Move the window on pointer events, before any video frame is decoded or
+// painted. Dragging a still window no longer needs an animation loop.
+func (p *player) handleInput(ev ui.InputEvent) bool {
+	if ev.Kind == ui.InputPointerUp && ev.Button == 0 && p.dragWin {
+		// mygo delivers the final pointer move before the release event.
+		// Applying the same local coordinates again would move twice.
+		if p.dragMoved {
+			p.lastTap = time.Time{} // a completed drag is not a double-click
+		}
+	}
+	handled := p.in.handle(ev)
+	switch ev.Kind {
+	case ui.InputPointerDown:
+		if ev.Button != 0 {
+			break
+		}
+		if !p.empty && ev.Y >= p.in.h-barHeight {
+			break // the playback frame handles seeking
+		}
+		now := time.Now()
+		p.idle = now
+		if !p.empty && now.Sub(p.lastTap) < 400*time.Millisecond {
+			p.dragWin = false
+			p.toggleFullscreen()
+		} else {
+			if c, ok := p.pointerScreen(ev); ok {
+				p.startWindowDrag(c)
+			}
+		}
+		p.lastTap = now
+	case ui.InputPointerMove:
+		if p.dragWin {
+			if c, ok := p.pointerScreen(ev); ok {
+				p.dragTo(c)
+			}
+			return false // moving the native window needs no content repaint
+		}
+	case ui.InputPointerUp:
+		if ev.Button == 0 {
+			p.dragWin = false
+		}
+	}
+	return handled
 }
 
 // requestOpen asks for path to be played. It is called from the drop
@@ -536,16 +679,19 @@ func (p *player) requestOpen(path string) {
 	}
 }
 
-// load opens path and plays it. It is called on the UI thread, and only
-// while nothing plays: a file dropped on a playing picture is ignored.
+// load replaces the current video on the UI thread after the new first
+// frame is decoded successfully.
 func (p *player) load(path string) {
 	dec, info, err := decoder.Open(path)
+	var firstPTS time.Duration
 	if errors.Is(err, decoder.ErrNoVideo) || (err == nil && (info.Width == 0 || info.Height == 0)) {
 		return // audio only: dropped files with no picture are ignored
 	}
 	if err == nil {
-		if _, derr := dec.Next(); derr != nil {
+		if f, derr := dec.Next(); derr != nil {
 			err = derr
+		} else {
+			firstPTS = f.PTS
 		}
 	}
 	if err != nil {
@@ -568,6 +714,8 @@ func (p *player) load(path string) {
 		p.ad.Close()
 	}
 	p.dec, p.info, p.ad, p.ap = dec, info, nil, nil
+	p.shownPTS = firstPTS
+	p.sourcePath = path
 	p.subs = loadSubtitles(path)
 	p.subStyle = parseASSHeader(dec.SubtitleHeader())
 	p.subW, p.subH = dec.SubtitleSize()
@@ -585,7 +733,9 @@ func (p *player) load(path string) {
 	p.bm = ui.NewBitmap(p.img)
 	p.bm.Update(p.img)
 	p.empty = false
+	p.endingBM = nil
 	p.base, p.started = 0, time.Now()
+	p.lateAudio = false
 	p.paused, p.eof, p.pending = false, false, nil
 	p.bar, p.idle = 1, time.Now()
 	if p.full {
@@ -643,13 +793,16 @@ func (p *player) seekTo(t time.Duration) {
 	f, err := p.dec.SeekTo(t)
 	p.embedded = append(p.embedded[:0], p.dec.Subtitles()...)
 	p.eof = false
+	p.eofAt = time.Time{}
 	p.pending = nil
 	p.base = t
 	p.started = time.Now()
+	p.lateAudio = false
 	landed := time.Duration(-1)
 	if err == nil {
 		if f != nil {
 			landed = f.PTS
+			p.shownPTS = f.PTS
 		}
 		p.bm.Update(p.img)
 		p.shown++
@@ -658,6 +811,64 @@ func (p *player) seekTo(t time.Duration) {
 		p.ap.Seek(t)
 	}
 	logf_("seek %v -> %v in %v", t.Round(time.Millisecond), landed, time.Since(start).Round(time.Millisecond))
+}
+
+func mediaInfoLines(info decoder.Info) [2]string {
+	fps := "帧率未知"
+	if info.FPS > 0 {
+		fps = fmt.Sprintf("%.2f fps", info.FPS)
+	}
+	audioRate := "无音频"
+	if info.HasAudio {
+		audioRate = "音频 " + formatBitRate(info.AudioBitRate)
+	}
+	return [2]string{
+		fmt.Sprintf("%s · 原始 %d×%d", fps, info.Width, info.Height),
+		"视频 " + formatBitRate(info.VideoBitRate) + " · " + audioRate,
+	}
+}
+
+func formatBitRate(rate int64) string {
+	if rate <= 0 {
+		return "码率未知"
+	}
+	if rate >= 1000000 {
+		return fmt.Sprintf("%.2f Mbps", float64(rate)/1000000)
+	}
+	return fmt.Sprintf("%.0f kbps", float64(rate)/1000)
+}
+
+func (p *player) stepFrame(backward bool) {
+	if p.dec == nil || p.empty {
+		return
+	}
+	p.setPaused(true)
+	from := p.shownPTS
+	var f *decoder.Frame
+	var err error
+	if backward {
+		f, err = p.dec.FrameBefore(from)
+	} else {
+		f, err = p.dec.SeekTo(from + time.Millisecond)
+	}
+	p.embedded = append(p.embedded[:0], p.dec.Subtitles()...)
+	p.pending = nil
+	p.eof, p.eofAt = false, time.Time{}
+	p.bar, p.idle = 1, time.Now()
+	if err != nil {
+		if !errors.Is(err, decoder.ErrEOF) {
+			logf_("frame step: %v", err)
+		}
+		p.base = from
+		return
+	}
+	p.shownPTS, p.base = f.PTS, f.PTS
+	p.bm.Update(p.img)
+	p.shown++
+	if p.ap != nil {
+		p.ap.Seek(f.PTS)
+	}
+	logf_("frame step backward=%t %v -> %v paused=%t", backward, from, f.PTS, p.paused)
 }
 
 // pump shows decoded frames while they are due at pos.
@@ -682,17 +893,25 @@ func (p *player) pump(pos time.Duration, max int) {
 			continue
 		}
 		p.bm.Update(p.img)
+		if !p.motionLogged && p.pending.PTS > p.shownPTS {
+			p.motionLogged = true
+			logf_("startup: video advanced from %v to %v at %v", p.shownPTS, p.pending.PTS, time.Since(t0))
+		}
+		p.shownPTS = p.pending.PTS
 		p.shown++
 		p.pending = nil
 	}
 }
 
-// setDwm tells the window manager how to draw the window's frame: Windows
-// 11 rounds frameless windows and paints a one pixel border, which shows at
-// the edge of a fullscreen picture.
+// Keep rounded window corners without Windows 11's visible border.
+// Fullscreen uses square corners to cover the whole display.
 func setDwm(hwnd uintptr, corners int32, border uint32) {
-	procDwmSetAttribute.Call(hwnd, dwmwaCornerPreference, uintptr(unsafe.Pointer(&corners)), 4)
-	procDwmSetAttribute.Call(hwnd, dwmwaBorderColor, uintptr(unsafe.Pointer(&border)), 4)
+	if hr, _, _ := procDwmSetAttribute.Call(hwnd, dwmwaCornerPreference, uintptr(unsafe.Pointer(&corners)), 4); int32(hr) < 0 {
+		logf_("DWM corner preference: HRESULT 0x%08X", uint32(hr))
+	}
+	if hr, _, _ := procDwmSetAttribute.Call(hwnd, dwmwaBorderColor, uintptr(unsafe.Pointer(&border)), 4); int32(hr) < 0 {
+		logf_("DWM border color: HRESULT 0x%08X", uint32(hr))
+	}
 }
 
 func (p *player) toggleFullscreen() {
@@ -705,7 +924,7 @@ func (p *player) toggleFullscreen() {
 		w := p.saved.Right - p.saved.Left
 		h := p.saved.Bottom - p.saved.Top
 		setWindowPos(hwnd, hwndNotTop, p.saved.Left, p.saved.Top, w, h, swpFrameChanged)
-		setDwm(hwnd, dwmcpDefault, dwmColorDefault)
+		setDwm(hwnd, dwmcpRound, dwmColorNone)
 		p.full = false
 		return
 	}
@@ -733,8 +952,17 @@ func (p *player) update() {
 	over := false
 	if p.win != nil {
 		if c, ok := cursorPos(); ok {
-			if r, ok := windowRect(p.win.NativeHandle()); ok {
-				over = c.X >= r.Left && c.X < r.Right && c.Y >= r.Top && c.Y < r.Bottom
+			hwnd := p.win.NativeHandle()
+			at, _, _ := procWindowFromPoint.Call(uintptr(uint32(c.X)) | uintptr(uint32(c.Y))<<32)
+			root, _, _ := procGetAncestor.Call(at, 2) // GA_ROOT: ignore windows covering us
+			var client rect
+			ok, _, _ := procGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&client)))
+			converted, _, _ := procScreenToClient.Call(hwnd, uintptr(unsafe.Pointer(&c)))
+			if ok != 0 && converted != 0 && client.Right > 0 && client.Bottom > 0 {
+				over = root == hwnd && c.X >= 0 && c.Y >= 0 && c.X < client.Right && c.Y < client.Bottom
+				if over {
+					x, y = float32(c.X)*w/float32(client.Right), float32(c.Y)*h/float32(client.Bottom)
+				}
 			}
 		}
 	}
@@ -755,17 +983,33 @@ func (p *player) update() {
 	if pending != "" {
 		p.load(pending)
 	}
+	if p.in.Pressed(ui.KeySpace) && (p.empty || p.eof) && p.sourcePath != "" {
+		if p.empty {
+			p.load(p.sourcePath)
+		} else {
+			p.seekTo(0)
+			p.setPaused(false)
+			if p.ap != nil {
+				p.ap.Play() // an audio voice that reached EOF also needs restarting
+			}
+			p.bar, p.idle = 1, now
+		}
+		logf_("replay from start")
+		return // this Space starts playback; do not treat it as a pause too
+	}
 	if p.eof && !p.eofAt.IsZero() && now.After(p.eofAt) {
 		p.reset()
 	}
 
 	if p.empty {
-		// The empty window only drags; nothing else answers.
-		if p.in.PointerPressed(0) {
-			p.startWindowDrag()
-		}
-		p.dragIfHeld()
 		return
+	}
+	if p.in.Pressed(ui.KeyA) || p.in.Pressed(ui.KeyD) {
+		p.stepFrame(p.in.Pressed(ui.KeyA))
+		return
+	}
+	if len(p.in.pressed) > 0 || p.in.bPressed[0] || p.in.wheelY != 0 {
+		p.idle = now
 	}
 	if p.in.Pressed(ui.KeySpace) {
 		p.setPaused(!p.paused)
@@ -807,30 +1051,23 @@ func (p *player) update() {
 	p.overBar = inBar
 	// The overlay stays while the pointer rests over it: the bar, the clock
 	// above it, and the scrim they sit on.
-	p.overUI = over && y >= h-(barHeight+40)
+	p.overUI = over && y >= h-overlayHeight
 	if p.in.PointerPressed(0) {
 		if inBar {
 			p.dragging = true
 			p.mute(true)
 			p.idle = now
-		} else if now.Sub(p.lastTap) < 400*time.Millisecond {
-			p.toggleFullscreen()
-		} else {
-			p.idle = now
-			p.startWindowDrag()
 		}
-		p.lastTap = now
 	}
 	if p.dragging {
 		if p.in.PointerDown(0) {
-			p.seekTo(time.Duration(float64(x) / float64(w) * float64(p.duration())))
+			p.seekTo(time.Duration(seekFraction(x, w) * float64(p.duration())))
 			p.idle = now
 		} else {
 			p.dragging = false
 			p.mute(false)
 		}
 	}
-	p.dragIfHeld()
 
 	// Activity is entering the window, or moving more than a few pixels:
 	// a hand resting on a mouse still reports a pixel of movement now and
@@ -846,16 +1083,33 @@ func (p *player) update() {
 	}
 	p.wasOver = over
 	p.lastX, p.lastY, p.lastW, p.lastH = x, y, w, h
-	target := overlayTarget(p.overUI, p.dragging, now.Sub(p.idle))
-	p.bar += (target - p.bar) * 0.25
-	if p.bar < 0.01 {
-		p.bar = 0
+	target := overlayTarget(over, p.overUI, p.dragging, now.Sub(p.idle))
+	dt := now.Sub(p.overlayAt)
+	if p.overlayAt.IsZero() {
+		dt = 0
+	}
+	p.overlayAt = now
+	previousBar := p.bar
+	p.bar = fadeOverlay(p.bar, target, min(dt, 50*time.Millisecond))
+	if p.bar != previousBar && (p.bar == 0 || p.bar == 1) {
+		logf_("overlay: alpha=%.0f inside=%v controls=%v dragging=%v", p.bar, over, p.overUI, p.dragging)
 	}
 
 	if p.paused || p.eof || !p.ready || p.fileDrag {
 		return
 	}
-	p.pump(p.position(), 4)
+	p.joinAudio()
+	position := p.position()
+	if p.ap != nil && !p.clockLogged {
+		if position > 0 {
+			p.clockLogged = true
+			logf_("startup: audio clock advanced to %v at %v; output error=%v", position, time.Since(t0), audio.Err())
+		} else if !p.clockWaitLogged && time.Since(p.started) > time.Second {
+			p.clockWaitLogged = true
+			logf_("startup: audio clock still at zero after %v; output error=%v", time.Since(p.started), audio.Err())
+		}
+	}
+	p.pump(position, 4)
 
 	// Forget the subtitles that are behind us.
 	pos := p.position()
@@ -884,6 +1138,9 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 	pt.Fill(r, ui.RGBA(0, 0, 0, 1), 0)
 
 	if p.empty {
+		if p.endingBM != nil {
+			pt.Image(p.endingBM, r, ui.Cover)
+		}
 		p.drawEmpty(pt, r)
 		return
 	}
@@ -915,7 +1172,7 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 	// text reads over a white frame.
 	// The scrim stops below the subtitles, which keep a background of
 	// their own: none.
-	pt.FillGradient(ui.Rect{X: r.X, Y: r.Y + r.H - 72, W: r.W, H: 72},
+	pt.FillGradient(ui.Rect{X: r.X, Y: r.Y + r.H - overlayHeight, W: r.W, H: overlayHeight},
 		ui.LinearGradient{From: ui.RGBA(0, 0, 0, 0), To: ui.RGBA(0, 0, 0, 0.55*a), Angle: 180}, 0)
 
 	const inset = 20
@@ -953,6 +1210,16 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 	tw, thh := pt.MeasureText(0, first...)
 	ty := hit.Y - thh - 10 + (1-a)*6
 	pt.RichText(r.X+(r.W-tw)/2, ty, 0, first...)
+	lines := mediaInfoLines(p.info)
+	for i, line := range lines {
+		span := ui.Span{Text: line, Size: 12, Color: ui.RGBA(255, 255, 255, 0.70*a)}
+		mw, _ := pt.MeasureText(0, span)
+		if available := r.W - 2*inset; mw > available && available > 0 {
+			span.Size *= available / mw
+			mw, _ = pt.MeasureText(0, span)
+		}
+		pt.RichText(r.X+(r.W-mw)/2, ty-36+float32(i)*17, 0, span)
+	}
 
 	// The volume sits at the right edge, at the clock's baseline.
 	flash := float32(time.Since(p.volAt)) / float32(700*time.Millisecond)
@@ -964,13 +1231,13 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 
 	// Dragging shows the time the pointer is over.
 	if p.dragging {
-		label := clock(time.Duration(float64(p.lastX-inset-hit.X) / float64(track.W) * float64(p.duration())))
+		label := clock(time.Duration(seekFraction(p.lastX, r.W) * float64(p.duration())))
 		span := []ui.Span{{Text: label, Size: 11, Color: ui.RGBA(255, 255, 255, 0.95*a)}}
 		lw, lh := pt.MeasureText(0, span...)
 		bw, bh := lw+18, lh+10
 		bx := float32(p.lastX) - bw/2
 		bx = min(max(bx, r.X+8), r.X+r.W-8-bw)
-		by := hit.Y - 72
+		by := hit.Y - overlayHeight
 		pt.Fill(ui.Rect{X: bx, Y: by, W: bw, H: bh}, ui.RGBA(0, 0, 0, 0.62*a), 8)
 		pt.RichText(bx+9, by+5, 0, span...)
 	}
@@ -978,11 +1245,27 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 
 // overlayTarget says whether the overlay shows: over the UI, while dragging,
 // or within hideAfter of the last activity.
-func overlayTarget(overUI, dragging bool, idle time.Duration) float32 {
-	if overUI || dragging || idle < hideAfter {
+func overlayTarget(inside, overUI, dragging bool, idle time.Duration) float32 {
+	if dragging || inside && (overUI || idle < hideAfter) {
 		return 1
 	}
 	return 0
+}
+
+// Fade by elapsed time, independent of video frame rate. Clamp both ends so
+// a fully shown overlay actually becomes idle rather than animating forever.
+func fadeOverlay(alpha, target float32, dt time.Duration) float32 {
+	if target > alpha {
+		return min(target, alpha+float32(dt)/float32(120*time.Millisecond))
+	}
+	return max(target, alpha-float32(dt)/float32(220*time.Millisecond))
+}
+
+func seekFraction(x, width float32) float64 {
+	if width <= 40 {
+		return 0
+	}
+	return min(max(float64(x-20)/float64(width-40), 0), 1)
 }
 
 // movedFar reports whether the pointer travelled far enough to count as
@@ -1000,14 +1283,30 @@ func (p *player) drawEmpty(pt *ui.Painter, r ui.Rect) {
 		pt.ImageRegion(p.iconBmp, ui.Rect{}, dst, ui.ImageOptions{Tint: ui.RGBA(255, 255, 255, 0.25)})
 	}
 	title := []ui.Span{{Text: "把视频拖到这里", Size: 17, Color: ui.RGBA(255, 255, 255, 0.62)}}
-	tw, th := pt.MeasureText(0, title...)
-	ty := r.Y + r.H/2 + 18
-	pt.RichText(r.X+(r.W-tw)/2, ty, 0, title...)
-
 	formats := []ui.Span{{Text: "MP4 · MKV · AVI · WebM · TS · WMV · MOV · FLV",
 		Size: 12, Color: ui.RGBA(255, 255, 255, 0.30)}}
+	if p.bm != nil {
+		title[0].Text = "播放结束，把视频拖到这里"
+		title[0].Size *= 1.5
+		formats[0].Size *= 1.5
+		title[0].Weight = 700
+		formats[0].Weight = 700
+		title[0].Color = ui.RGBA(228, 230, 233, 1)
+		formats[0].Color = ui.RGBA(228, 230, 233, 1)
+	}
+	tw, th := pt.MeasureText(0, title...)
 	fw, _ := pt.MeasureText(0, formats...)
-	pt.RichText(r.X+(r.W-fw)/2, ty+th+10, 0, formats...)
+	ty := r.Y + r.H/2 + 18
+	pt.RichText(r.X+(r.W-tw)/2, ty, 0, title...)
+	textY := ty + th + 10
+	if p.bm != nil {
+		replay := title[0]
+		replay.Text = "按空格键重新播放"
+		rw, rh := pt.MeasureText(0, replay)
+		pt.RichText(r.X+(r.W-rw)/2, textY, 0, replay)
+		textY += rh + 10
+	}
+	pt.RichText(r.X+(r.W-fw)/2, textY, 0, formats...)
 }
 
 func (p *player) view(c *ui.Context) {
@@ -1015,7 +1314,7 @@ func (p *player) view(c *ui.Context) {
 	p.ctx = c
 	p.mu.Unlock()
 	e := ui.Box(c).Fill().Focusable().AutoFocus()
-	e.HandleInput(p.in.handle)
+	e.HandleInput(p.handleInput)
 	e.Draw(p.paint)
 	// The picture is the drop target too: it reports the drag so the system
 	// drag image can move while nothing else runs, and it takes the files.
@@ -1029,10 +1328,22 @@ func (p *player) view(c *ui.Context) {
 // another frame only while something moves. A still picture costs nothing,
 // which keeps the window free while files are dragged over it.
 func (p *player) paint(pt *ui.Painter, r ui.Rect) {
+	first := !p.ready
+	if first {
+		logf_("startup: first paint begin")
+	}
 	p.in.w, p.in.h = r.W, r.H
 	p.update()
 	p.in.step()
 	p.draw(pt, r)
+	if first {
+		logf_("startup: first paint built at %v", time.Since(t0))
+		// Queue a UI callback from another goroutine. It runs after this
+		// frame's synchronous renderer/presentation work has returned.
+		go mygo.RunOnMain(func() {
+			logf_("startup: UI responsive after first paint at %v", time.Since(t0))
+		})
+	}
 	if p.animating() {
 		pt.AnimationFrame()
 	} else {
@@ -1045,7 +1356,7 @@ func (p *player) animating() bool {
 	if p.fileDrag {
 		return false // let the drag image move about freely
 	}
-	if p.dragging || p.dragWin {
+	if p.dragging {
 		return true
 	}
 	if p.bar > 0.001 && p.bar < 0.999 {
@@ -1057,8 +1368,8 @@ func (p *player) animating() bool {
 	return !p.empty && !p.paused && !p.eof
 }
 
-// armFade wakes the window when the bar's two seconds of stillness are up:
-// nothing else would draw the frame that starts fading it.
+// Poll while a paused overlay is visible, including outside the window.
+// Pointer leave does not necessarily deliver another input event.
 func (p *player) armFade() {
 	if p.ctx == nil || p.bar <= 0 {
 		return
@@ -1068,13 +1379,7 @@ func (p *player) armFade() {
 		p.mu.Unlock()
 		return
 	}
-	d := 150 * time.Millisecond // look again while the pointer may be over the overlay
-	if !p.overUI {
-		d = time.Until(p.idle.Add(hideAfter))
-		if d < 0 {
-			d = 0
-		}
-	}
+	d := 100 * time.Millisecond
 	p.fadeTimer = time.AfterFunc(d, func() {
 		p.mu.Lock()
 		p.fadeTimer = nil
@@ -1084,8 +1389,15 @@ func (p *player) armFade() {
 	p.mu.Unlock()
 }
 
-// reset goes back to the window with no file in it, as when it starts.
+// reset releases playback and returns to the drop screen, retaining the
+// last video bitmap as its background until another file is opened.
 func (p *player) reset() {
+	if p.img != nil {
+		// Compute once at half the ending window's resolution. Scaling back
+		// up gives the selected Gaussian blur without filtering every repaint.
+		frame := imaging.Fill(p.img, emptyW/2, emptyH/2, imaging.Center, imaging.Linear)
+		p.endingBM = ui.NewBitmap(imaging.Blur(frame, float64(endingBlur)/2))
+	}
 	if p.dec != nil {
 		p.dec.Close()
 		p.dec = nil
@@ -1098,11 +1410,13 @@ func (p *player) reset() {
 		p.ad.Close()
 		p.ad = nil
 	}
-	p.bm, p.img, p.pending, p.subs = nil, nil, nil, nil
+	p.pending, p.subs = nil, nil
+	p.embedded, p.subBmp, p.subBmpAt = nil, nil, ""
 	p.empty, p.eof, p.paused = true, false, false
 	p.eofAt = time.Time{}
 	p.bar, p.shown, p.dropped = 0, 0, 0
 	p.base, p.started = 0, time.Now()
+	p.lateAudio = false
 	if p.full {
 		p.toggleFullscreen()
 	}

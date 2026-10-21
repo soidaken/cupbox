@@ -15,6 +15,9 @@ type Info struct {
 	Width, Height int
 	Duration      time.Duration
 	FPS           float64
+	VideoBitRate  int64 // average encoded bits/s; zero when unavailable
+	AudioBitRate  int64
+	HasAudio      bool
 }
 
 // Frame is one decoded picture as premultiplied-compatible RGBA bytes:

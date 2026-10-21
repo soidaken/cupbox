@@ -48,8 +48,16 @@ static int ad_open(const char *path, ad_t **out, char *err, int errlen) {
     a->buf = malloc(sizeof(float) * AD_CHANNELS * a->capFrames);
     int e = avformat_open_input(&a->fc, path, NULL, NULL);
     if (e < 0) { av_strerror(e, err, errlen); ad_close(a); return -1; }
-    e = avformat_find_stream_info(a->fc, NULL);
-    if (e < 0) { av_strerror(e, err, errlen); ad_close(a); return -1; }
+    // Avoid a second video/audio probe when MP4/MOV headers are complete.
+    int headerAudio = av_find_best_stream(a->fc, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+    int complete = headerAudio >= 0 && strstr(a->fc->iformat->name, "mov") &&
+        a->fc->streams[headerAudio]->codecpar->sample_rate > 0 &&
+        a->fc->streams[headerAudio]->codecpar->ch_layout.nb_channels > 0 &&
+        a->fc->streams[headerAudio]->codecpar->codec_id != AV_CODEC_ID_NONE;
+    if (!complete) {
+        e = avformat_find_stream_info(a->fc, NULL);
+        if (e < 0) { av_strerror(e, err, errlen); ad_close(a); return -1; }
+    }
     a->stream = av_find_best_stream(a->fc, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     if (a->stream < 0) { snprintf(err, errlen, "no audio stream"); ad_close(a); return -1; }
     AVStream *st = a->fc->streams[a->stream];
