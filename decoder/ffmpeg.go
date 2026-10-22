@@ -6,19 +6,32 @@ package decoder
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/hwcontext.h>
 #include <libswscale/swscale.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
+// The policy of hardware decoding lives in Go: these decide whether a
+// stream should go to the device, and remember one that failed on it.
+int goHWAllowed(int codec, int profile, int width, int height, int maxWidth, int maxHeight);
+void goHWFailed(int codec, int profile, int width, int height);
+void goHWNote(const char *note);
+
 typedef struct {
     AVFormatContext *fc;
     AVCodecContext  *cc;
+    const AVCodec   *dec;
     struct SwsContext *sws;
+    int swsFormat;
     AVPacket *pkt;
     AVFrame  *frm;
+    AVFrame  *swfrm; // the device's frame, copied back to memory
     int stream;
     int width, height;
+    int codecID, profile;
+    int hw;        // frames come from the D3D11VA device
+    int hwFails;   // transfers that failed since the last open
     int64_t durationMs;
     double fps;
     int64_t videoBitRate, audioBitRate;
@@ -38,6 +51,9 @@ typedef struct {
     int subErr;
 } cd_t;
 
+// cd_seek moves the picture, flushing what the decoders held.
+static int cd_seek(cd_t *c, int64_t ms);
+
 static void cd_clear_subs(cd_t *c) {
     for (int i = 0; i < c->subCount; i++) {
         free(c->subText[i]);
@@ -46,6 +62,85 @@ static void cd_clear_subs(cd_t *c) {
         c->subPix[i] = NULL;
     }
     c->subCount = 0;
+}
+
+// cd_hw_device returns the D3D11VA device this process decodes on, or NULL
+// when the machine has none. It is made once and shared by every stream.
+static AVBufferRef *cd_hw_device(void) {
+    static AVBufferRef *dev;
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        if (av_hwdevice_ctx_create(&dev, AV_HWDEVICE_TYPE_D3D11VA, NULL, NULL, 0) < 0) dev = NULL;
+    }
+    return dev;
+}
+
+// cd_hw_limits returns the largest picture the device decodes, zero for
+// what it does not say. Old integrated GPUs stop well below 4K.
+static void cd_hw_limits(int *w, int *h) {
+    *w = *h = 0;
+    AVBufferRef *dev = cd_hw_device();
+    if (!dev) return;
+    AVHWFramesConstraints *c = av_hwdevice_get_hwframe_constraints(dev, NULL);
+    if (!c) return;
+    *w = c->max_width;
+    *h = c->max_height;
+    av_hwframe_constraints_free(&c);
+}
+
+// cd_hw_config reports whether this build carries a D3D11VA decoder for
+// dec that takes a device context: the build, not the machine.
+static int cd_hw_config(const AVCodec *dec) {
+    for (int i = 0; ; i++) {
+        const AVCodecHWConfig *cfg = avcodec_get_hw_config(dec, i);
+        if (!cfg) return 0;
+        if (cfg->device_type == AV_HWDEVICE_TYPE_D3D11VA &&
+            (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) return 1;
+    }
+}
+
+// cd_get_format takes the device's format when FFmpeg offers it, and the
+// codec's first otherwise: a stream the driver will not take decodes on
+// the CPU from here, without reopening anything.
+static enum AVPixelFormat cd_get_format(AVCodecContext *cc, const enum AVPixelFormat *fmts) {
+    for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++) {
+        if (*p == AV_PIX_FMT_D3D11) return *p;
+    }
+    return fmts[0];
+}
+
+// cd_open_codec opens the video decoder afresh, on the device when hw is
+// set. Opening again is how a stream moves between the two.
+static int cd_open_codec(cd_t *c, int hw) {
+    AVStream *st = c->fc->streams[c->stream];
+    if (c->cc) avcodec_free_context(&c->cc);
+    c->cc = avcodec_alloc_context3(c->dec);
+    if (!c->cc) return AVERROR(ENOMEM);
+    int e = avcodec_parameters_to_context(c->cc, st->codecpar);
+    if (e < 0) return e;
+    if (hw) {
+        c->cc->hw_device_ctx = av_buffer_ref(cd_hw_device());
+        if (!c->cc->hw_device_ctx) return AVERROR_EXTERNAL;
+        c->cc->get_format = cd_get_format;
+    }
+    c->cc->thread_count = 8; // enough for 1080p, and far less memory than one per core
+    c->cc->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    e = avcodec_open2(c->cc, c->dec, NULL);
+    c->hw = hw && e >= 0;
+    c->hwFails = 0;
+    return e;
+}
+
+// cd_switch_cpu gives up on the device for this file and continues on the
+// CPU at ms, so that a picture that will not come never stalls playback.
+static int cd_switch_cpu(cd_t *c, int64_t ms) {
+    goHWFailed(c->codecID, c->profile, c->width, c->height);
+    int e = cd_open_codec(c, 0);
+    if (e < 0) return e;
+    if (c->swfrm) av_frame_free(&c->swfrm);
+    if (c->sws) { sws_freeContext(c->sws); c->sws = NULL; c->swsFormat = 0; }
+    return cd_seek(c, ms);
 }
 
 // cd_slot makes room for one more event, dropping the oldest when full.
@@ -177,6 +272,7 @@ static void cd_close(cd_t *c) {
     cd_clear_subs(c);
     if (c->sc) avcodec_free_context(&c->sc);
     if (c->sws) sws_freeContext(c->sws);
+    if (c->swfrm) av_frame_free(&c->swfrm);
     if (c->frm) av_frame_free(&c->frm);
     if (c->pkt) av_packet_free(&c->pkt);
     if (c->cc) avcodec_free_context(&c->cc);
@@ -184,7 +280,7 @@ static void cd_close(cd_t *c) {
     free(c);
 }
 
-static int cd_open(const char *path, cd_t **out, char *err, int errlen) {
+static int cd_open(const char *path, int wantHW, cd_t **out, char *err, int errlen) {
     av_log_set_level(AV_LOG_ERROR);
     cd_t *c = calloc(1, sizeof(cd_t));
     if (!c) return -1;
@@ -206,13 +302,24 @@ static int cd_open(const char *path, cd_t **out, char *err, int errlen) {
     AVStream *st = c->fc->streams[c->stream];
     const AVCodec *dec = avcodec_find_decoder(st->codecpar->codec_id);
     if (!dec) { snprintf(err, errlen, "no decoder"); cd_close(c); return -1; }
-    c->cc = avcodec_alloc_context3(dec);
-    if (!c->cc) { snprintf(err, errlen, "no memory"); cd_close(c); return -1; }
-    e = avcodec_parameters_to_context(c->cc, st->codecpar);
-    if (e < 0) { av_strerror(e, err, errlen); cd_close(c); return -1; }
-    c->cc->thread_count = 8; // enough for 1080p, and far less memory than one per core
-    c->cc->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-    e = avcodec_open2(c->cc, dec, NULL);
+    c->dec = dec;
+    c->codecID = st->codecpar->codec_id;
+    c->profile = st->codecpar->profile;
+    // The device is asked only when this build has the decoder for this
+    // codec, the machine has a device, the stream fits what it decodes
+    // and Go's policy says yes. Everything else opens on the CPU.
+    int hw = 0;
+    if (wantHW && cd_hw_config(dec) && cd_hw_device()) {
+        int maxW, maxH;
+        cd_hw_limits(&maxW, &maxH);
+        hw = goHWAllowed(c->codecID, c->profile, st->codecpar->width, st->codecpar->height, maxW, maxH);
+    }
+    e = cd_open_codec(c, hw);
+    if (e < 0 && hw) {
+        // Opened, but the driver would not take this stream after all.
+        goHWFailed(c->codecID, c->profile, st->codecpar->width, st->codecpar->height);
+        e = cd_open_codec(c, 0);
+    }
     if (e < 0) { av_strerror(e, err, errlen); cd_close(c); return -1; }
     c->width = c->cc->width;
     c->height = c->cc->height;
@@ -246,20 +353,40 @@ static int cd_open(const char *path, cd_t **out, char *err, int errlen) {
     return 0;
 }
 
-// cd_to_rgba converts frm into dst (width*height*4 bytes).
-static void cd_to_rgba(cd_t *c, AVFrame *frm, uint8_t *dst) {
-    if (!c->sws) {
-        c->sws = sws_getContext(frm->width, frm->height, frm->format,
-            frm->width, frm->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
+// cd_to_rgba converts frm into dst (width*height*4 bytes). A frame the
+// device decoded is first copied back to memory, which is the price of
+// keeping the picture on the CPU side of the renderer.
+static int cd_to_rgba(cd_t *c, AVFrame *frm, uint8_t *dst, char *err, int errlen) {
+    AVFrame *src = frm;
+    if (frm->format == AV_PIX_FMT_D3D11) {
+        if (!c->swfrm && !(c->swfrm = av_frame_alloc())) { snprintf(err, errlen, "no memory"); return -1; }
+        // The frame keeps its buffers between pictures: allocating them
+        // again, and a staging texture with them, costs more than the copy.
+        if (c->swfrm->format != AV_PIX_FMT_NONE &&
+            (c->swfrm->width != frm->width || c->swfrm->height != frm->height)) {
+            av_frame_unref(c->swfrm);
+        }
+        int e = av_hwframe_transfer_data(c->swfrm, frm, 0);
+        if (e < 0) { av_strerror(e, err, errlen); return -1; }
+        src = c->swfrm;
+    }
+    if (!c->sws || c->swsFormat != src->format) {
+        if (c->sws) sws_freeContext(c->sws);
+        c->sws = sws_getContext(src->width, src->height, src->format,
+            src->width, src->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
+        c->swsFormat = src->format;
+        if (!c->sws) { snprintf(err, errlen, "cannot convert"); return -1; }
     }
     uint8_t *d[4] = { dst, NULL, NULL, NULL };
-    int ds[4] = { frm->width * 4, 0, 0, 0 };
-    sws_scale(c->sws, (const uint8_t * const *)frm->data, frm->linesize, 0, frm->height, d, ds);
+    int ds[4] = { src->width * 4, 0, 0, 0 };
+    sws_scale(c->sws, (const uint8_t * const *)src->data, src->linesize, 0, src->height, d, ds);
+    return 0;
 }
 
 // cd_next decodes the next frame at or after minMs into dst, decoding and
 // dropping the frames before it without converting them, as an accurate
-// seek does. 1 = frame (ptsMs set), 0 = EOF, -1 = error (err set).
+// seek does. 1 = frame (ptsMs set), 0 = EOF, -2 = the device could not
+// hand its frame over (err set), -1 = error (err set).
 static int cd_next(cd_t *c, uint8_t *dst, int64_t *ptsMs, int64_t minMs, char *err, int errlen) {
     for (;;) {
         if (!c->draining) {
@@ -289,7 +416,10 @@ static int cd_next(cd_t *c, uint8_t *dst, int64_t *ptsMs, int64_t minMs, char *e
             if (ts != AV_NOPTS_VALUE) ms = av_rescale_q(ts, st->time_base, (AVRational){1, 1000});
             if (ms < minMs) { av_frame_unref(c->frm); continue; }
             *ptsMs = ms;
-            if (dst) cd_to_rgba(c, c->frm, dst);
+            if (dst && cd_to_rgba(c, c->frm, dst, err, errlen) < 0) {
+                av_frame_unref(c->frm);
+                return -2;
+            }
             av_frame_unref(c->frm);
             return 1;
         }
@@ -341,6 +471,7 @@ static int cd_seek(cd_t *c, int64_t ms) {
     return 0;
 }
 static int cd_has_subs(cd_t *c) { return c->sc != NULL; }
+static int cd_hw(cd_t *c) { return c->hw; }
 static int cd_sub_codec(cd_t *c) { return c->subStream >= 0 ? (int)c->fc->streams[c->subStream]->codecpar->codec_id : -1; }
 static int cd_sub_err(cd_t *c) { return c->subStream >= 0 ? c->subErr : -1; }
 static int cd_sub_width(cd_t *c) { return c->subStream >= 0 ? c->fc->streams[c->subStream]->codecpar->width : 0; }
@@ -386,11 +517,15 @@ import (
 
 // Decoder decodes the video track of a file, one frame at a time.
 type Decoder struct {
-	c      *C.cd_t
-	info   Info
-	buf    []byte
-	frame  Frame
-	errbuf [256]C.char
+	c        *C.cd_t
+	info     Info
+	buf      []byte
+	frame    Frame
+	errbuf   [256]C.char
+	lastPTS  time.Duration // where playback has reached, to resume after a fallback
+	resume   time.Duration // where a fallback left the stream: frames before it are stale
+	hwFails  int           // frames the device could not hand over since the last one did
+	firstOne bool          // no frame decoded yet: the device gets one budget
 }
 
 // Open opens path and reads only what it needs to describe the video.
@@ -400,7 +535,11 @@ func Open(path string) (*Decoder, Info, error) {
 
 	var c *C.cd_t
 	d := &Decoder{}
-	if rc := C.cd_open(cpath, &c, &d.errbuf[0], C.int(len(d.errbuf))); rc < 0 {
+	wantHW := C.int(0)
+	if hwMightBeUsed() {
+		wantHW = 1
+	}
+	if rc := C.cd_open(cpath, wantHW, &c, &d.errbuf[0], C.int(len(d.errbuf))); rc < 0 {
 		msg := C.GoString(&d.errbuf[0])
 		if msg == "no video stream" {
 			return nil, Info{}, ErrNoVideo
@@ -419,11 +558,19 @@ func Open(path string) (*Decoder, Info, error) {
 	}
 	d.buf = make([]byte, d.info.Width*d.info.Height*4)
 	d.frame.RGBA = d.buf
+	if C.cd_hw(c) != 0 {
+		d.info.HW = "d3d11va"
+		Note(fmt.Sprintf("decoding with d3d11va (%dx%d)", d.info.Width, d.info.Height))
+	}
+	d.firstOne = true
 	return d, d.info, nil
 }
 
 // Info returns what Open learned about the video.
 func (d *Decoder) Info() Info { return d.info }
+
+// HW reports whether this decoder's pictures come from the device.
+func (d *Decoder) HW() bool { return d.c != nil && C.cd_hw(d.c) != 0 }
 
 // Pixels returns the buffer Next fills with RGBA bytes, so that a caller
 // that draws straight from it copies no picture.
@@ -441,6 +588,7 @@ func (d *Decoder) SeekTo(t time.Duration) (*Frame, error) {
 	if rc := C.cd_seek(d.c, C.int64_t(t.Milliseconds())); rc < 0 {
 		return nil, fmt.Errorf("decoder: seek failed (%d)", int(rc))
 	}
+	d.resume = 0
 	return d.decode(C.int64_t(t.Milliseconds()))
 }
 
@@ -467,17 +615,72 @@ func (d *Decoder) FrameBefore(t time.Duration) (*Frame, error) {
 }
 
 func (d *Decoder) decode(minMs C.int64_t) (*Frame, error) {
-	var pts C.int64_t
-	rc := C.cd_next(d.c, (*C.uint8_t)(unsafe.Pointer(&d.buf[0])), &pts, minMs, &d.errbuf[0], C.int(len(d.errbuf)))
-	switch {
-	case rc == 1:
-		d.frame.PTS = time.Duration(pts) * time.Millisecond
-		return &d.frame, nil
-	case rc == 0:
-		return nil, ErrEOF
-	default:
+	// A fallback seeks back to the keyframe before the frame that was last
+	// shown, so the frames between it and there are stale pictures.
+	if d.resume > 0 && minMs >= 0 && minMs < C.int64_t(d.resume.Milliseconds()) {
+		minMs = C.int64_t(d.resume.Milliseconds())
+	} else if d.resume > 0 && minMs < 0 {
+		minMs = C.int64_t(d.resume.Milliseconds())
+	}
+	for {
+		start := time.Now()
+		var pts C.int64_t
+		rc := C.cd_next(d.c, (*C.uint8_t)(unsafe.Pointer(&d.buf[0])), &pts, minMs, &d.errbuf[0], C.int(len(d.errbuf)))
+		elapsed := time.Since(start)
+		if rc == 1 {
+			d.firstOne = false
+			d.hwFails = 0
+			d.frame.PTS = time.Duration(pts) * time.Millisecond
+			d.lastPTS = d.frame.PTS
+			return &d.frame, nil
+		}
+		if rc == 0 {
+			d.firstOne = false
+			return nil, ErrEOF
+		}
+		if d.HW() {
+			// A device that hands over nothing, or takes too long over the
+			// first picture, is replaced by the CPU at the same place.
+			why := C.GoString(&d.errbuf[0])
+			if why == "" {
+				why = "no frame"
+			}
+			if rc != -2 {
+				d.hwFails = hwTransferFails
+			} else {
+				d.hwFails++
+			}
+			if d.hwFails >= hwTransferFails || (d.firstOne && elapsed > firstFrameBudget) {
+				if err := d.fallBack(why); err == nil {
+					continue
+				}
+			}
+		}
 		return nil, fmt.Errorf("decoder: %s", C.GoString(&d.errbuf[0]))
 	}
+}
+
+// switchCPU moves the stream to the CPU at the frame last shown, so that a
+// device that cannot decode this file does not stop the player.
+func (d *Decoder) switchCPU() error {
+	at := d.lastPTS.Milliseconds()
+	if rc := C.cd_switch_cpu(d.c, C.int64_t(at)); rc < 0 {
+		return fmt.Errorf("decoder: cannot decode on the CPU (%d)", int(rc))
+	}
+	d.info.HW = ""
+	d.firstOne = false
+	d.hwFails = 0
+	d.resume = d.lastPTS
+	return nil
+}
+
+// fallBack moves to the CPU and says why.
+func (d *Decoder) fallBack(why string) error {
+	if err := d.switchCPU(); err != nil {
+		return err
+	}
+	Note(fmt.Sprintf("falling back to the CPU at %v: %s", d.lastPTS, why))
+	return nil
 }
 
 // Seek moves to the keyframe at or before t.
@@ -485,6 +688,7 @@ func (d *Decoder) Seek(t time.Duration) error {
 	if rc := C.cd_seek(d.c, C.int64_t(t.Milliseconds())); rc < 0 {
 		return fmt.Errorf("decoder: seek failed (%d)", int(rc))
 	}
+	d.resume = 0
 	return nil
 }
 

@@ -73,6 +73,7 @@ func main() {
 		p.in = newInput()
 	} else {
 		path := os.Args[1]
+		decoder.Note = func(s string) { logf_("hw: %s", s) }
 		logf_("startup: opening video %q", path)
 		dec, info, err := decoder.Open(path)
 		logf_("startup: video open at %v", time.Since(t0))
@@ -822,9 +823,13 @@ func mediaInfoLines(info decoder.Info) [2]string {
 	if info.HasAudio {
 		audioRate = "音频 " + formatBitRate(info.AudioBitRate)
 	}
+	decode := ""
+	if info.HW != "" {
+		decode = " · 硬解"
+	}
 	return [2]string{
 		fmt.Sprintf("%s · 原始 %d×%d", fps, info.Width, info.Height),
-		"视频 " + formatBitRate(info.VideoBitRate) + " · " + audioRate,
+		"视频 " + formatBitRate(info.VideoBitRate) + " · " + audioRate + decode,
 	}
 }
 
@@ -1210,7 +1215,11 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 	tw, thh := pt.MeasureText(0, first...)
 	ty := hit.Y - thh - 10 + (1-a)*6
 	pt.RichText(r.X+(r.W-tw)/2, ty, 0, first...)
-	lines := mediaInfoLines(p.info)
+	info := p.info
+	if p.dec != nil && !p.dec.HW() {
+		info.HW = ""
+	}
+	lines := mediaInfoLines(info)
 	for i, line := range lines {
 		span := ui.Span{Text: line, Size: 12, Color: ui.RGBA(255, 255, 255, 0.70*a)}
 		mw, _ := pt.MeasureText(0, span)

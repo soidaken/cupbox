@@ -18,6 +18,10 @@ type Info struct {
 	VideoBitRate  int64 // average encoded bits/s; zero when unavailable
 	AudioBitRate  int64
 	HasAudio      bool
+
+	// HW names the device decoding this file, empty when the pictures are
+	// decoded on the CPU. It changes to empty if playback had to fall back.
+	HW string
 }
 
 // Frame is one decoded picture as premultiplied-compatible RGBA bytes:

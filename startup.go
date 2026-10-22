@@ -46,7 +46,8 @@ func logf_(format string, a ...any) {
 	if startupLog.file == nil {
 		return
 	}
-	if startupLog.automatic && (!strings.HasPrefix(format, "startup:") && !strings.HasPrefix(format, "fatal:") && !strings.HasPrefix(format, "no audio:") || startupLog.written >= 64*1024) {
+	if startupLog.automatic && (!strings.HasPrefix(format, "startup:") && !strings.HasPrefix(format, "fatal:") &&
+		!strings.HasPrefix(format, "no audio:") && !strings.HasPrefix(format, "hw:") || startupLog.written >= 64*1024) {
 		return
 	}
 	n, _ := fmt.Fprintf(startupLog.file, "%s +%v %s\n", time.Now().Format(time.RFC3339Nano), time.Since(t0), fmt.Sprintf(format, a...))

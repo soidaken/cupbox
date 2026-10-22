@@ -23,7 +23,17 @@ Built from FFmpeg `release/8.0` with MSYS2 mingw64 (gcc 14.2.0) and:
 --enable-parser=h264,hevc,av1,vp9,vp8,mpeg4video,mpegvideo,vc1,opus,flac,
   mpegaudio,ac3,dca,aac
 --enable-protocol=file --enable-shared --disable-static
+--enable-d3d11va
+--enable-hwaccel=h264_d3d11va,h264_d3d11va2,hevc_d3d11va,hevc_d3d11va2,
+  vp9_d3d11va,vp9_d3d11va2,av1_d3d11va,av1_d3d11va2,mpeg2_d3d11va,
+  mpeg2_d3d11va2,vc1_d3d11va,vc1_d3d11va2,wmv3_d3d11va,wmv3_d3d11va2
 ```
+
+Both the plain and the `d3d11va2` hwaccels are needed: only `d3d11va2`
+takes a device context, but the FFmpeg makefile compiles the objects they
+share (`libavcodec/dxva2_*.c`) for the plain one, so enabling `d3d11va2`
+alone fails to link. The device path is off by default in Cupbox for the
+reason measured in `docs/DESIGN.md`; `CUPBOX_HW=on` uses it.
 
 `--disable-x86asm` because the build machine had no nasm; it costs some
 decode speed and nothing else.
