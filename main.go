@@ -814,7 +814,10 @@ func (p *player) seekTo(t time.Duration) {
 	logf_("seek %v -> %v in %v", t.Round(time.Millisecond), landed, time.Since(start).Round(time.Millisecond))
 }
 
-func mediaInfoLines(info decoder.Info) [2]string {
+// mediaInfoLines returns the two lines above the clock, and the marker
+// that says what decodes the picture: this is the decoder at work now, so
+// it reads 硬件 after a fallback too.
+func mediaInfoLines(info decoder.Info) (lines [2]string, decode string) {
 	fps := "帧率未知"
 	if info.FPS > 0 {
 		fps = fmt.Sprintf("%.2f fps", info.FPS)
@@ -823,14 +826,14 @@ func mediaInfoLines(info decoder.Info) [2]string {
 	if info.HasAudio {
 		audioRate = "音频 " + formatBitRate(info.AudioBitRate)
 	}
-	decode := ""
+	decode = "软解"
 	if info.HW != "" {
-		decode = " · 硬解"
+		decode = "硬解"
 	}
 	return [2]string{
 		fmt.Sprintf("%s · 原始 %d×%d", fps, info.Width, info.Height),
-		"视频 " + formatBitRate(info.VideoBitRate) + " · " + audioRate + decode,
-	}
+		"视频 " + formatBitRate(info.VideoBitRate) + " · " + audioRate,
+	}, decode
 }
 
 func formatBitRate(rate int64) string {
@@ -1219,15 +1222,26 @@ func (p *player) draw(pt *ui.Painter, r ui.Rect) {
 	if p.dec != nil && !p.dec.HW() {
 		info.HW = ""
 	}
-	lines := mediaInfoLines(info)
+	lines, decode := mediaInfoLines(info)
 	for i, line := range lines {
-		span := ui.Span{Text: line, Size: 12, Color: ui.RGBA(255, 255, 255, 0.70*a)}
-		mw, _ := pt.MeasureText(0, span)
-		if available := r.W - 2*inset; mw > available && available > 0 {
-			span.Size *= available / mw
-			mw, _ = pt.MeasureText(0, span)
+		spans := []ui.Span{{Text: line, Size: 12, Color: ui.RGBA(255, 255, 255, 0.70*a)}}
+		if i == 1 {
+			// The decode marker sits at the end of the last line, brighter
+			// and bolder so it reads as a tag rather than more metadata.
+			spans = append(spans,
+				ui.Span{Text: "  ·  ", Size: 12, Color: ui.RGBA(255, 255, 255, 0.32*a)},
+				ui.Span{Text: decode, Size: 12, Weight: 600, Color: ui.RGBA(255, 255, 255, 0.92*a)},
+			)
 		}
-		pt.RichText(r.X+(r.W-mw)/2, ty-36+float32(i)*17, 0, span)
+		mw, _ := pt.MeasureText(0, spans...)
+		if available := r.W - 2*inset; mw > available && available > 0 {
+			shrink := available / mw
+			for k := range spans {
+				spans[k].Size *= shrink
+			}
+			mw, _ = pt.MeasureText(0, spans...)
+		}
+		pt.RichText(r.X+(r.W-mw)/2, ty-36+float32(i)*17, 0, spans...)
 	}
 
 	// The volume sits at the right edge, at the clock's baseline.

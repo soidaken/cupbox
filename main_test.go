@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"cupbox/decoder"
 )
 
 func TestOverlayTarget(t *testing.T) {
@@ -94,5 +96,24 @@ func TestMovedFar(t *testing.T) {
 		if got := movedFar(c.x, c.y, c.ax, c.ay); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestMediaInfoLines(t *testing.T) {
+	info := decoder.Info{FPS: 30, Width: 1920, Height: 1080, HasAudio: true, VideoBitRate: 5707475, AudioBitRate: 68975}
+	lines, decode := mediaInfoLines(info)
+	if decode != "软解" {
+		t.Fatalf("decode marker = %q, want 软解", decode)
+	}
+	if want := "30.00 fps · 原始 1920×1080"; lines[0] != want {
+		t.Fatalf("first line = %q, want %q", lines[0], want)
+	}
+	if want := "视频 5.71 Mbps · 音频 69 kbps"; lines[1] != want {
+		t.Fatalf("second line = %q, want %q", lines[1], want)
+	}
+
+	info.HW = "d3d11va"
+	if _, decode := mediaInfoLines(info); decode != "硬解" {
+		t.Fatalf("decode marker = %q, want 硬解", decode)
 	}
 }
