@@ -17,7 +17,7 @@ Win32 窗口、D3D11 渲染和 WASAPI 音频来自 [mygo](https://github.com/ego
 需要 Go 1.27+，以及构建安装包时的 NSIS（`C:\Program Files (x86)\NSIS`）。FFmpeg 的头文件、导入库和 DLL 已经在 `third_party/`，不需要另外装。
 
 ```powershell
-powershell packaging\build.ps1     # cupbox.exe + dist\Cupbox-Setup-0.1.0.exe + dist\Cupbox-0.1.0-portable.zip
+powershell packaging\build.ps1     # cupbox.exe + dist\Cupbox-Setup-0.2.0.exe + dist\Cupbox-0.2.0-portable.zip
 go build -o cupbox.exe .           # 只出主程序（先跑一次 build.ps1 准备好 .tools\ffmpeg-min）
 ```
 

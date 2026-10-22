@@ -4,7 +4,7 @@ Unicode true
 !include "FileFunc.nsh"
 
 !define APPNAME    "Cupbox"
-!define APPVER     "0.1.0"
+!define APPVER     "0.2.0"
 !define PROGID     "Cupbox.Video"
 !define PUBLISHER  "Cupbox"
 
@@ -15,7 +15,7 @@ InstallDirRegKey HKCU "Software\${APPNAME}" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
-VIProductVersion "0.1.0.0"
+VIProductVersion "0.2.0.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "FileDescription" "${APPNAME} 安装程序"
 VIAddVersionKey "FileVersion"     "${APPVER}"

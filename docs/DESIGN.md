@@ -166,7 +166,7 @@ t=0     进程启动
 
 - `assets/icon.svg` 是母版：深色圆角方块（#0E0E12，圆角 112/512），亮黄 #FFD60A 的 `cup` / `box` 两行，粗体 800、字号 188、紧字距。
 - 渲染：`chrome --headless --screenshot` 出 512×512 透明 PNG；Pillow 缩出 256 与多尺寸 `icon.ico`（16/24/32/48/64/128/256）。
-- 可执行文件图标与版本信息：`app.rc` 用 `windres -O coff -o rsrc.syso app.rc` 编进二进制；ProductName / FileDescription 都是 `Cupbox`，版本 0.1.0。
+- 可执行文件图标与版本信息：`app.rc` 用 `windres -O coff -o rsrc.syso app.rc` 编进二进制；ProductName / FileDescription 都是 `Cupbox`，版本 0.2.0。
 - 运行时的窗口与任务栏图标：`go:embed assets/icon-256.png` + `Window.SetIcon`，开发时任务栏也显示正确图标。
 - 重新生成：`python tools/make-icon.py`（未建，命令见上）→ `windres ...` → `go build`。
 
@@ -226,8 +226,8 @@ M1 剩余：光标随浮层隐藏；暂停状态下 seek 后的首帧刷新复�
 
 - **FFmpeg 最小构建**：源码 `release/8.0`，MSYS2 + mingw64 编译，`--disable-everything` 后只开上面 D2 列出的容器/解码器/解析器，另加字幕解码器（ass/subrip/movtext/webvtt/pgssub/dvdsub/dvbsub）与 zlib（MKV 压缩字幕轨需要），LGPL v2.1，不开 x86asm（机器上没有 nasm）。DLL 合计 **10MB**（原通用构建 165MB）。
 - **打开失败**：损坏或不支持的视频弹一个原生 `MessageBox`（标题 Cupbox、一行错误）；**纯音频文件（mp3/flac/wav…）直接静默退出**，不开窗、不提示——Cupbox 只播画面。拖入纯音频同样忽略，正在播的片子不受影响。
-- **安装包**：NSIS，`packaging/cupbox.nsi`，**按用户安装**（`%LOCALAPPDATA%\Programs\Cupbox`，不需要管理员权限）。产物 `dist/Cupbox-Setup-0.1.0.exe` 约 **9.4MB**。安装目录除 FFmpeg 的 5 个 DLL 外，还必须带 `zlib1.dll`（avformat 解 MKV 压缩字幕轨）与 `libwinpthread-1.dll`（avutil 的线程库）——这两个在开发机上来自 MSYS2 的 PATH，新机器上没有，缺了会报“找不到 zlib1.dll”。`packaging/build.ps1` 会自动从 `.tools/ffmpeg-min/bin` 和 `C:\msys64\mingw64in` 补齐。
-- **便携版**：`dist/Cupbox-0.1.0-portable.zip` 约 **10MB**，解压即用。
+- **安装包**：NSIS，`packaging/cupbox.nsi`，**按用户安装**（`%LOCALAPPDATA%\Programs\Cupbox`，不需要管理员权限）。产物 `dist/Cupbox-Setup-0.2.0.exe` 约 **6.8MB**。安装目录除 FFmpeg 的 5 个 DLL 外，还必须带 `zlib1.dll`（avformat 解 MKV 压缩字幕轨）与 `libwinpthread-1.dll`（avutil 的线程库）——这两个在开发机上来自 MSYS2 的 PATH，新机器上没有，缺了会报“找不到 zlib1.dll”。`packaging/build.ps1` 会自动从 `.tools/ffmpeg-min/bin` 和 `C:\msys64\mingw64in` 补齐。
+- **便携版**：`dist/Cupbox-0.2.0-portable.zip` 约 **9MB**，解压即用。
 - **关联注册**（HKCU）：ProgID `Cupbox.Video`（含 `shell\open\command`、`DefaultIcon`），16 种扩展（mp4/m4v/mkv/webm/avi/mov/flv/ts/m2ts/mts/mpg/mpeg/vob/wmv/asf/ogv）都写进 `OpenWithProgids` 与 `Capabilities\FileAssociations`，另有 `Applications\cupbox.exe`、`RegisteredApplications`；卸载时全部清除，并顺手清掉旧版本用过的 `Cupbox.mp4`。
 - **默认播放器**：Windows 10/11 禁止安装程序静默设置默认程序，只能注册“可成为默认”的资格。安装完成页提供默认勾选的按钮，直接打开 `ms-settings:defaultapps` 让用户选一次；右键“打开方式 → 始终使用”同样生效。
 - 重新打包：`powershell packaging/build.ps1`。

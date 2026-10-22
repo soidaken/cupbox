@@ -43,12 +43,12 @@ if (Test-Path $makensis) {
     Write-Warning "NSIS not found: skipped the installer"
 }
 
-$stage = "dist\Cupbox-0.1.0-portable"
+$stage = "dist\Cupbox-0.2.0-portable"
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $stage | Out-Null
 Copy-Item cupbox.exe, "*.dll", "assets\icon.ico", "packaging\NOTICE.txt", `
     "packaging\LICENSE-FFmpeg-LGPLv2.1.txt" $stage
-Compress-Archive -Path "$stage\*" -DestinationPath "dist\Cupbox-0.1.0-portable.zip" -Force
+Compress-Archive -Path "$stage\*" -DestinationPath "dist\Cupbox-0.2.0-portable.zip" -Force
 Remove-Item $stage -Recurse -Force
 
 Get-ChildItem dist | Select-Object Name, Length

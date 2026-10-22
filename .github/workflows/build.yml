@@ -48,7 +48,7 @@ jobs:
           path: |
             cupbox.exe
             dist/Cupbox-Setup-*.exe
-            dist/Cupbox-0.1.0-portable.zip
+            dist/Cupbox-*-portable.zip
           if-no-files-found: error
 
       # A v* tag publishes what it built, so a release always matches a commit.
